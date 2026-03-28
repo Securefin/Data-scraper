@@ -200,7 +200,7 @@ def check_has_more_cs(soup, page: int) -> bool:
 #  SOURCE 1 — IndiaMart Directory
 # ============================================================
 def scrape_indiamart(city, page=1):
-    url  = f"https://dir.indiamart.com/{city['im']}/dental-clinic.html?bpg={page}"
+    url  = f"https://dir.indiamart.com/{city['im']}/dental-clinics.html?bpg={page}"
     html = get_html(url, extra_headers={"Referer": "https://dir.indiamart.com/"})
     if not html:
         return [], False
