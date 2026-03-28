@@ -231,27 +231,39 @@ def close_pw():
             pass
         _pw_inst = _pw_browser = _pw_ctx = None
 
-def pw_get_html(url, wait_selector=None, scroll=False, timeout=40000):
-    """Playwright se page ka rendered HTML lo."""
+def pw_get_html(url, wait_selector=None, scroll=False, timeout=40000, retries=2):
+    """Playwright se page ka rendered HTML lo — retry with fresh page."""
     ctx = get_pw_ctx()
-    pg  = ctx.new_page()
-    try:
-        pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
-        if wait_selector:
+    for attempt in range(retries):
+        pg = ctx.new_page()
+        try:
+            pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            # networkidle wait — JS content load hone do
             try:
-                pg.wait_for_selector(wait_selector, timeout=15000)
+                pg.wait_for_load_state("networkidle", timeout=8000)
             except PWTimeout:
-                pass  # jo mila wo lo
-        if scroll:
-            for _ in range(3):
-                pg.evaluate("window.scrollBy(0, window.innerHeight)")
-                pg.wait_for_timeout(700)
-        return pg.content()
-    except Exception as e:
-        log.warning(f"  PW error: {e}")
-        return None
-    finally:
-        pg.close()
+                pass
+            if wait_selector:
+                try:
+                    pg.wait_for_selector(wait_selector, timeout=12000)
+                except PWTimeout:
+                    if attempt < retries - 1:
+                        log.warning(f"  PW selector miss (attempt {attempt+1}) — retry")
+                        pg.close()
+                        time.sleep(2)
+                        continue  # retry
+            if scroll:
+                for _ in range(4):
+                    pg.evaluate("window.scrollBy(0, window.innerHeight)")
+                    pg.wait_for_timeout(800)
+            return pg.content()
+        except Exception as e:
+            log.warning(f"  PW error (attempt {attempt+1}): {e}")
+            if attempt < retries - 1:
+                time.sleep(3)
+        finally:
+            pg.close()
+    return None
 
 
 # ============================================================
