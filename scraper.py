@@ -1,13 +1,16 @@
 """
-India Dental Clinic Scraper v5
-Sources: IndiaMart + Clinicspots + Practo
-GitHub Actions pe daily run hota hai
+India Dental Clinic Scraper v8
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Sources:
+  requests (fast, no JS needed):
+    1. Practo      — practo.com/{city}/clinics/dental-clinics
+    2. Clinicspots  — clinicspots.com/dentist/{city}
+    3. Sulekha      — sulekha.com/dentists/{city}
 
-v5 Changes:
- - FIX: IndiaMart URL  → dental-clinic.html  → dental-clinics.html  (plural)
- - FIX: Clinicspots URL → /in/{city}/dentist  → /dentist/{city}
- - NEW: Practo source added → practo.com/{city}/clinics/dental-clinics
- - Practo JSON-LD + HTML fallback parser
+  Playwright (headless Chrome, JS sites):
+    4. JustDial     — justdial.com/{City}/Dentists/nct-10156331
+
+GitHub Actions pe daily run — ubuntu-latest pe Chromium headless free mein chalta hai.
 """
 
 import os, re, time, random, json, logging, hashlib
@@ -16,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -28,86 +32,79 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ─────────────────────────────────────────────────
-DAILY_LIMIT   = 200
-SHEET_NAME    = "Business Data"
-BATCH_SIZE    = 20
-IM_MAX_PAGES  = 8
-CS_MAX_PAGES  = 10
-PR_MAX_PAGES  = 10
-HEADERS_ROW   = [
-    "Name", "Category", "Phone", "Email*", "Website",
+DAILY_LIMIT  = 200
+SHEET_NAME   = "Business Data"
+BATCH_SIZE   = 20
+MAX_PAGES    = 10
+HEADERS_ROW  = [
+    "Name", "Category", "Phone", "Email", "Website",
     "Address", "City", "State", "Rating", "Reviews",
     "Source URL", "Fetched On", "Source"
 ]
 
-# ─── USER AGENTS ────────────────────────────────────────────
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
 ]
 
-# ─── ALL 50 CITIES ──────────────────────────────────────────
-# im  = IndiaMart slug
-# cs  = Clinicspots slug
-# pr  = Practo slug
+# ─── CITIES ─────────────────────────────────────────────────
+# jd = JustDial city slug (Title Case, exact)
 CITIES = [
-    {"city":"Mumbai",             "state":"Maharashtra",    "im":"mumbai",             "cs":"mumbai",             "pr":"mumbai"},
-    {"city":"Delhi",              "state":"Delhi",          "im":"delhi",              "cs":"delhi",              "pr":"delhi"},
-    {"city":"Bangalore",          "state":"Karnataka",      "im":"bangalore",          "cs":"bangalore",          "pr":"bangalore"},
-    {"city":"Hyderabad",          "state":"Telangana",      "im":"hyderabad",          "cs":"hyderabad",          "pr":"hyderabad"},
-    {"city":"Chennai",            "state":"Tamil Nadu",     "im":"chennai",            "cs":"chennai",            "pr":"chennai"},
-    {"city":"Kolkata",            "state":"West Bengal",    "im":"kolkata",            "cs":"kolkata",            "pr":"kolkata"},
-    {"city":"Pune",               "state":"Maharashtra",    "im":"pune",               "cs":"pune",               "pr":"pune"},
-    {"city":"Ahmedabad",          "state":"Gujarat",        "im":"ahmedabad",          "cs":"ahmedabad",          "pr":"ahmedabad"},
-    {"city":"Jaipur",             "state":"Rajasthan",      "im":"jaipur",             "cs":"jaipur",             "pr":"jaipur"},
-    {"city":"Lucknow",            "state":"Uttar Pradesh",  "im":"lucknow",            "cs":"lucknow",            "pr":"lucknow"},
-    {"city":"Surat",              "state":"Gujarat",        "im":"surat",              "cs":"surat",              "pr":"surat"},
-    {"city":"Kanpur",             "state":"Uttar Pradesh",  "im":"kanpur",             "cs":"kanpur",             "pr":"kanpur"},
-    {"city":"Nagpur",             "state":"Maharashtra",    "im":"nagpur",             "cs":"nagpur",             "pr":"nagpur"},
-    {"city":"Indore",             "state":"Madhya Pradesh", "im":"indore",             "cs":"indore",             "pr":"indore"},
-    {"city":"Bhopal",             "state":"Madhya Pradesh", "im":"bhopal",             "cs":"bhopal",             "pr":"bhopal"},
-    {"city":"Patna",              "state":"Bihar",          "im":"patna",              "cs":"patna",              "pr":"patna"},
-    {"city":"Vadodara",           "state":"Gujarat",        "im":"vadodara",           "cs":"vadodara",           "pr":"vadodara"},
-    {"city":"Ludhiana",           "state":"Punjab",         "im":"ludhiana",           "cs":"ludhiana",           "pr":"ludhiana"},
-    {"city":"Agra",               "state":"Uttar Pradesh",  "im":"agra",               "cs":"agra",               "pr":"agra"},
-    {"city":"Nashik",             "state":"Maharashtra",    "im":"nashik",             "cs":"nashik",             "pr":"nashik"},
-    {"city":"Faridabad",          "state":"Haryana",        "im":"faridabad",          "cs":"faridabad",          "pr":"faridabad"},
-    {"city":"Meerut",             "state":"Uttar Pradesh",  "im":"meerut",             "cs":"meerut",             "pr":"meerut"},
-    {"city":"Rajkot",             "state":"Gujarat",        "im":"rajkot",             "cs":"rajkot",             "pr":"rajkot"},
-    {"city":"Varanasi",           "state":"Uttar Pradesh",  "im":"varanasi",           "cs":"varanasi",           "pr":"varanasi"},
-    {"city":"Amritsar",           "state":"Punjab",         "im":"amritsar",           "cs":"amritsar",           "pr":"amritsar"},
-    {"city":"Allahabad",          "state":"Uttar Pradesh",  "im":"allahabad",          "cs":"prayagraj",          "pr":"allahabad"},
-    {"city":"Ranchi",             "state":"Jharkhand",      "im":"ranchi",             "cs":"ranchi",             "pr":"ranchi"},
-    {"city":"Coimbatore",         "state":"Tamil Nadu",     "im":"coimbatore",         "cs":"coimbatore",         "pr":"coimbatore"},
-    {"city":"Gwalior",            "state":"Madhya Pradesh", "im":"gwalior",            "cs":"gwalior",            "pr":"gwalior"},
-    {"city":"Vijayawada",         "state":"Andhra Pradesh", "im":"vijayawada",         "cs":"vijayawada",         "pr":"vijayawada"},
-    {"city":"Jodhpur",            "state":"Rajasthan",      "im":"jodhpur",            "cs":"jodhpur",            "pr":"jodhpur"},
-    {"city":"Raipur",             "state":"Chhattisgarh",   "im":"raipur",             "cs":"raipur",             "pr":"raipur"},
-    {"city":"Chandigarh",         "state":"Chandigarh",     "im":"chandigarh",         "cs":"chandigarh",         "pr":"chandigarh"},
-    {"city":"Mysore",             "state":"Karnataka",      "im":"mysore",             "cs":"mysore",             "pr":"mysore"},
-    {"city":"Bhubaneswar",        "state":"Odisha",         "im":"bhubaneswar",        "cs":"bhubaneswar",        "pr":"bhubaneswar"},
-    {"city":"Guwahati",           "state":"Assam",          "im":"guwahati",           "cs":"guwahati",           "pr":"guwahati"},
-    {"city":"Kochi",              "state":"Kerala",         "im":"kochi",              "cs":"kochi",              "pr":"kochi"},
-    {"city":"Thiruvananthapuram", "state":"Kerala",         "im":"thiruvananthapuram", "cs":"thiruvananthapuram", "pr":"thiruvananthapuram"},
-    {"city":"Visakhapatnam",      "state":"Andhra Pradesh", "im":"visakhapatnam",      "cs":"visakhapatnam",      "pr":"visakhapatnam"},
-    {"city":"Jalandhar",          "state":"Punjab",         "im":"jalandhar",          "cs":"jalandhar",          "pr":"jalandhar"},
-    {"city":"Madurai",            "state":"Tamil Nadu",     "im":"madurai",            "cs":"madurai",            "pr":"madurai"},
-    {"city":"Srinagar",           "state":"J&K",            "im":"srinagar",           "cs":"srinagar",           "pr":"srinagar"},
-    {"city":"Aurangabad",         "state":"Maharashtra",    "im":"aurangabad",         "cs":"aurangabad",         "pr":"aurangabad"},
-    {"city":"Dehradun",           "state":"Uttarakhand",    "im":"dehradun",           "cs":"dehradun",           "pr":"dehradun"},
-    {"city":"Jabalpur",           "state":"Madhya Pradesh", "im":"jabalpur",           "cs":"jabalpur",           "pr":"jabalpur"},
-    {"city":"Warangal",           "state":"Telangana",      "im":"warangal",           "cs":"warangal",           "pr":"warangal"},
-    {"city":"Hubli",              "state":"Karnataka",      "im":"hubli",              "cs":"hubli",              "pr":"hubli"},
-    {"city":"Tiruchirappalli",    "state":"Tamil Nadu",     "im":"tiruchirappalli",    "cs":"tiruchirappalli",    "pr":"tiruchirappalli"},
-    {"city":"Bareilly",           "state":"Uttar Pradesh",  "im":"bareilly",           "cs":"bareilly",           "pr":"bareilly"},
-    {"city":"Moradabad",          "state":"Uttar Pradesh",  "im":"moradabad",          "cs":"moradabad",          "pr":"moradabad"},
-    {"city":"Salem",              "state":"Tamil Nadu",     "im":"salem",              "cs":"salem",              "pr":"salem"},
+    {"city":"Mumbai",             "state":"Maharashtra",    "cs":"mumbai",             "pr":"mumbai",             "sl":"mumbai",             "jd":"Mumbai"},
+    {"city":"Delhi",              "state":"Delhi",          "cs":"delhi",              "pr":"delhi",              "sl":"delhi",              "jd":"Delhi"},
+    {"city":"Bangalore",          "state":"Karnataka",      "cs":"bangalore",          "pr":"bangalore",          "sl":"bangalore",          "jd":"Bangalore"},
+    {"city":"Hyderabad",          "state":"Telangana",      "cs":"hyderabad",          "pr":"hyderabad",          "sl":"hyderabad",          "jd":"Hyderabad"},
+    {"city":"Chennai",            "state":"Tamil Nadu",     "cs":"chennai",            "pr":"chennai",            "sl":"chennai",            "jd":"Chennai"},
+    {"city":"Kolkata",            "state":"West Bengal",    "cs":"kolkata",            "pr":"kolkata",            "sl":"kolkata",            "jd":"Kolkata"},
+    {"city":"Pune",               "state":"Maharashtra",    "cs":"pune",               "pr":"pune",               "sl":"pune",               "jd":"Pune"},
+    {"city":"Ahmedabad",          "state":"Gujarat",        "cs":"ahmedabad",          "pr":"ahmedabad",          "sl":"ahmedabad",          "jd":"Ahmedabad"},
+    {"city":"Jaipur",             "state":"Rajasthan",      "cs":"jaipur",             "pr":"jaipur",             "sl":"jaipur",             "jd":"Jaipur"},
+    {"city":"Lucknow",            "state":"Uttar Pradesh",  "cs":"lucknow",            "pr":"lucknow",            "sl":"lucknow",            "jd":"Lucknow"},
+    {"city":"Surat",              "state":"Gujarat",        "cs":"surat",              "pr":"surat",              "sl":"surat",              "jd":"Surat"},
+    {"city":"Kanpur",             "state":"Uttar Pradesh",  "cs":"kanpur",             "pr":"kanpur",             "sl":"kanpur",             "jd":"Kanpur"},
+    {"city":"Nagpur",             "state":"Maharashtra",    "cs":"nagpur",             "pr":"nagpur",             "sl":"nagpur",             "jd":"Nagpur"},
+    {"city":"Indore",             "state":"Madhya Pradesh", "cs":"indore",             "pr":"indore",             "sl":"indore",             "jd":"Indore"},
+    {"city":"Bhopal",             "state":"Madhya Pradesh", "cs":"bhopal",             "pr":"bhopal",             "sl":"bhopal",             "jd":"Bhopal"},
+    {"city":"Patna",              "state":"Bihar",          "cs":"patna",              "pr":"patna",              "sl":"patna",              "jd":"Patna"},
+    {"city":"Vadodara",           "state":"Gujarat",        "cs":"vadodara",           "pr":"vadodara",           "sl":"vadodara",           "jd":"Vadodara"},
+    {"city":"Ludhiana",           "state":"Punjab",         "cs":"ludhiana",           "pr":"ludhiana",           "sl":"ludhiana",           "jd":"Ludhiana"},
+    {"city":"Agra",               "state":"Uttar Pradesh",  "cs":"agra",               "pr":"agra",               "sl":"agra",               "jd":"Agra"},
+    {"city":"Nashik",             "state":"Maharashtra",    "cs":"nashik",             "pr":"nashik",             "sl":"nashik",             "jd":"Nashik"},
+    {"city":"Faridabad",          "state":"Haryana",        "cs":"faridabad",          "pr":"faridabad",          "sl":"faridabad",          "jd":"Faridabad"},
+    {"city":"Meerut",             "state":"Uttar Pradesh",  "cs":"meerut",             "pr":"meerut",             "sl":"meerut",             "jd":"Meerut"},
+    {"city":"Rajkot",             "state":"Gujarat",        "cs":"rajkot",             "pr":"rajkot",             "sl":"rajkot",             "jd":"Rajkot"},
+    {"city":"Varanasi",           "state":"Uttar Pradesh",  "cs":"varanasi",           "pr":"varanasi",           "sl":"varanasi",           "jd":"Varanasi"},
+    {"city":"Amritsar",           "state":"Punjab",         "cs":"amritsar",           "pr":"amritsar",           "sl":"amritsar",           "jd":"Amritsar"},
+    {"city":"Allahabad",          "state":"Uttar Pradesh",  "cs":"prayagraj",          "pr":"allahabad",          "sl":"allahabad",          "jd":"Allahabad"},
+    {"city":"Ranchi",             "state":"Jharkhand",      "cs":"ranchi",             "pr":"ranchi",             "sl":"ranchi",             "jd":"Ranchi"},
+    {"city":"Coimbatore",         "state":"Tamil Nadu",     "cs":"coimbatore",         "pr":"coimbatore",         "sl":"coimbatore",         "jd":"Coimbatore"},
+    {"city":"Gwalior",            "state":"Madhya Pradesh", "cs":"gwalior",            "pr":"gwalior",            "sl":"gwalior",            "jd":"Gwalior"},
+    {"city":"Vijayawada",         "state":"Andhra Pradesh", "cs":"vijayawada",         "pr":"vijayawada",         "sl":"vijayawada",         "jd":"Vijayawada"},
+    {"city":"Jodhpur",            "state":"Rajasthan",      "cs":"jodhpur",            "pr":"jodhpur",            "sl":"jodhpur",            "jd":"Jodhpur"},
+    {"city":"Raipur",             "state":"Chhattisgarh",   "cs":"raipur",             "pr":"raipur",             "sl":"raipur",             "jd":"Raipur"},
+    {"city":"Chandigarh",         "state":"Chandigarh",     "cs":"chandigarh",         "pr":"chandigarh",         "sl":"chandigarh",         "jd":"Chandigarh"},
+    {"city":"Mysore",             "state":"Karnataka",      "cs":"mysore",             "pr":"mysore",             "sl":"mysore",             "jd":"Mysore"},
+    {"city":"Bhubaneswar",        "state":"Odisha",         "cs":"bhubaneswar",        "pr":"bhubaneswar",        "sl":"bhubaneswar",        "jd":"Bhubaneswar"},
+    {"city":"Guwahati",           "state":"Assam",          "cs":"guwahati",           "pr":"guwahati",           "sl":"guwahati",           "jd":"Guwahati"},
+    {"city":"Kochi",              "state":"Kerala",         "cs":"kochi",              "pr":"kochi",              "sl":"kochi",              "jd":"Kochi"},
+    {"city":"Thiruvananthapuram", "state":"Kerala",         "cs":"thiruvananthapuram", "pr":"thiruvananthapuram", "sl":"thiruvananthapuram", "jd":"Thiruvananthapuram"},
+    {"city":"Visakhapatnam",      "state":"Andhra Pradesh", "cs":"visakhapatnam",      "pr":"visakhapatnam",      "sl":"visakhapatnam",      "jd":"Visakhapatnam"},
+    {"city":"Jalandhar",          "state":"Punjab",         "cs":"jalandhar",          "pr":"jalandhar",          "sl":"jalandhar",          "jd":"Jalandhar"},
+    {"city":"Madurai",            "state":"Tamil Nadu",     "cs":"madurai",            "pr":"madurai",            "sl":"madurai",            "jd":"Madurai"},
+    {"city":"Srinagar",           "state":"J&K",            "cs":"srinagar",           "pr":"srinagar",           "sl":"srinagar",           "jd":"Srinagar"},
+    {"city":"Aurangabad",         "state":"Maharashtra",    "cs":"aurangabad",         "pr":"aurangabad",         "sl":"aurangabad",         "jd":"Aurangabad"},
+    {"city":"Dehradun",           "state":"Uttarakhand",    "cs":"dehradun",           "pr":"dehradun",           "sl":"dehradun",           "jd":"Dehradun"},
+    {"city":"Jabalpur",           "state":"Madhya Pradesh", "cs":"jabalpur",           "pr":"jabalpur",           "sl":"jabalpur",           "jd":"Jabalpur"},
+    {"city":"Warangal",           "state":"Telangana",      "cs":"warangal",           "pr":"warangal",           "sl":"warangal",           "jd":"Warangal"},
+    {"city":"Hubli",              "state":"Karnataka",      "cs":"hubli",              "pr":"hubli",              "sl":"hubli",              "jd":"Hubli-Dharwad"},
+    {"city":"Tiruchirappalli",    "state":"Tamil Nadu",     "cs":"tiruchirappalli",    "pr":"tiruchirappalli",    "sl":"tiruchirappalli",    "jd":"Tiruchirappalli"},
+    {"city":"Bareilly",           "state":"Uttar Pradesh",  "cs":"bareilly",           "pr":"bareilly",           "sl":"bareilly",           "jd":"Bareilly"},
+    {"city":"Moradabad",          "state":"Uttar Pradesh",  "cs":"moradabad",          "pr":"moradabad",          "sl":"moradabad",          "jd":"Moradabad"},
+    {"city":"Salem",              "state":"Tamil Nadu",     "cs":"salem",              "pr":"salem",              "sl":"salem",              "jd":"Salem"},
 ]
 
-SOURCES = ["indiamart", "clinicspots", "practo"]
+SOURCES = ["practo", "clinicspots", "sulekha", "justdial"]
 
 # ─── STATE ──────────────────────────────────────────────────
 STATE_FILE = "state.json"
@@ -122,223 +119,301 @@ def save_state(s):
     with open(STATE_FILE, "w") as f:
         json.dump(s, f)
 
-# ─── DEDUPLICATION ──────────────────────────────────────────
-def make_key(name: str, phone: str, address: str) -> str:
+# ─── UTILS ──────────────────────────────────────────────────
+def make_key(name, phone, address):
     raw = f"{name}|{phone}|{address}".lower().strip()
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    return hashlib.md5(raw.encode()).hexdigest()
 
-# ─── HTTP ────────────────────────────────────────────────────
-def get_html(url, extra_headers=None, timeout=25, retries=3):
-    headers = {
-        "User-Agent"      : random.choice(USER_AGENTS),
-        "Accept-Language" : "en-IN,en;q=0.9",
-        "Accept"          : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding" : "gzip, deflate, br",
-    }
-    if extra_headers:
-        headers.update(extra_headers)
+def now_ist():
+    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %H:%M")
 
+def new_session(referer):
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent"                : random.choice(USER_AGENTS),
+        "Accept"                    : "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language"           : "en-IN,en;q=0.9",
+        "Accept-Encoding"           : "gzip, deflate, br",
+        "Referer"                   : referer,
+        "Connection"                : "keep-alive",
+        "Upgrade-Insecure-Requests" : "1",
+    })
+    return s
+
+def get_html_req(session, url, timeout=25, retries=3):
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=headers, timeout=timeout)
+            r = session.get(url, timeout=timeout)
             if r.status_code == 200:
                 return r.text
             if r.status_code in (403, 404):
                 log.warning(f"  {r.status_code} — skip")
                 return None
             if r.status_code in (429, 503, 504):
-                wait = (attempt + 1) * 6
-                log.warning(f"  {r.status_code} — retry in {wait}s")
+                wait = int(r.headers.get("Retry-After", (attempt+1)*10))
+                log.warning(f"  {r.status_code} — wait {wait}s")
                 time.sleep(wait)
         except requests.exceptions.Timeout:
-            wait = (attempt + 1) * 3
-            log.warning(f"  Timeout (attempt {attempt+1}/{retries}) — wait {wait}s")
-            if attempt < retries - 1:
+            wait = (attempt+1)*4
+            log.warning(f"  Timeout ({attempt+1}/{retries}) — wait {wait}s")
+            if attempt < retries-1:
                 time.sleep(wait)
             else:
-                log.warning("  Max retries on timeout — skipping")
                 return None
         except Exception as e:
-            log.warning(f"  Error: {e} — retry {attempt+1}/{retries}")
+            log.warning(f"  Err: {e} — retry {attempt+1}")
             time.sleep(3)
     return None
 
-def now_ist():
-    return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %H:%M")
-
-# ─── has_more HELPERS ───────────────────────────────────────
-def check_has_more_im(soup, page):
-    if page >= IM_MAX_PAGES:
-        return False
-    return bool(soup.find("a", href=re.compile(rf"[?&]bpg={page+1}")))
-
-def check_has_more_cs(soup, page):
-    if page >= CS_MAX_PAGES:
-        return False
-    return bool(soup.find("a", href=re.compile(rf"[?&]page={page+1}")))
-
-def check_has_more_pr(soup, page):
-    if page >= PR_MAX_PAGES:
-        return False
-    # Practo uses ?page=N in pagination links
-    return bool(soup.find("a", href=re.compile(rf"[?&]page={page+1}")))
-
-# ─── JSON-LD PARSER (shared) ────────────────────────────────
-def parse_jsonld(soup, city, source_url, source_name):
-    rows = []
+def parse_jsonld(soup, city, url, src):
+    rows, skip = [], {"WebPage","WebSite","BreadcrumbList","Organization","ItemList"}
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
-            obj   = json.loads(tag.string or "")
+            obj = json.loads(tag.string or "")
             items = obj.get("@graph", [obj] if isinstance(obj, dict) else obj)
             if isinstance(items, dict):
                 items = [items]
             for item in items:
-                name = item.get("name", "").strip()
-                if not name or len(name) < 4:
+                name = item.get("name","").strip()
+                if not name or len(name) < 4 or item.get("@type","") in skip:
                     continue
-                if item.get("@type", "") in ("WebPage", "WebSite", "BreadcrumbList", "Organization"):
-                    continue
-                addr    = item.get("address", {})
-                phone   = str(item.get("telephone", ""))
-                street  = addr.get("streetAddress", "")
-                locality= addr.get("addressLocality", "")
-                address = (street + " " + locality).strip() or city["city"]
+                addr = item.get("address", {})
+                phone = str(item.get("telephone",""))
+                address = (addr.get("streetAddress","") + " " + addr.get("addressLocality","")).strip() or city["city"]
                 rows.append([
-                    name, "Dental Clinic",
-                    phone, "",
-                    item.get("url", ""),
-                    address,
-                    city["city"], city["state"],
-                    item.get("aggregateRating", {}).get("ratingValue", ""),
-                    item.get("aggregateRating", {}).get("reviewCount", ""),
-                    source_url, now_ist(), source_name
+                    name, "Dental Clinic", phone, "", item.get("url",""),
+                    address, city["city"], city["state"],
+                    item.get("aggregateRating",{}).get("ratingValue",""),
+                    item.get("aggregateRating",{}).get("reviewCount",""),
+                    url, now_ist(), src
                 ])
         except Exception:
             pass
     return rows
 
-
-# ============================================================
-#  SOURCE 1 — IndiaMart Directory
-# ============================================================
-def scrape_indiamart(city, page=1):
-    # FIX v4: dental-clinic → dental-clinics (plural)
-    url  = f"https://dir.indiamart.com/{city['im']}/dental-clinics.html?bpg={page}"
-    html = get_html(url, extra_headers={"Referer": "https://dir.indiamart.com/"})
-    if not html:
-        return [], False
-
-    soup     = BeautifulSoup(html, "html.parser")
-    rows     = parse_jsonld(soup, city, url, "IndiaMart")
-    has_more = check_has_more_im(soup, page)
-
-    # HTML fallback
-    if not rows:
-        for card in soup.find_all("div", class_=re.compile(r"(card|listing|company|bname|imprd)", re.I)):
-            name_tag = card.find(["h2", "h3", "a"], class_=re.compile(r"(name|title|bname|company)", re.I))
-            if not name_tag:
-                continue
-            name = name_tag.get_text(strip=True)
-            if not name or len(name) < 4:
-                continue
-            phone_m  = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
-            addr_tag = card.find(class_=re.compile(r"addr|address|location", re.I))
-            rows.append([
-                name, "Dental Clinic",
-                phone_m.group().strip() if phone_m else "", "", "",
-                addr_tag.get_text(strip=True) if addr_tag else city["city"],
-                city["city"], city["state"],
-                "", "", url, now_ist(), "IndiaMart"
-            ])
-
-    log.info(f"  IndiaMart {city['city']} p{page}: {len(rows)} records | has_more={has_more}")
-    return rows, has_more
+def check_has_more(soup, page, param="page"):
+    return page < MAX_PAGES and bool(soup.find("a", href=re.compile(rf"[?&]{param}={page+1}")))
 
 
 # ============================================================
-#  SOURCE 2 — Clinicspots
-# ============================================================
-def scrape_clinicspots(city, page=1):
-    # FIX v5: /in/{city}/dentist → /dentist/{city}
-    url  = f"https://www.clinicspots.com/dentist/{city['cs']}?page={page}"
-    html = get_html(url, extra_headers={"Referer": "https://www.clinicspots.com/"})
-    if not html:
-        return [], False
-
-    soup     = BeautifulSoup(html, "html.parser")
-    rows     = parse_jsonld(soup, city, url, "Clinicspots")
-    has_more = check_has_more_cs(soup, page)
-
-    # HTML fallback
-    if not rows:
-        for card in soup.find_all("div", class_=re.compile(r"(clinic|doctor|provider|card|listing)", re.I)):
-            name_tag = card.find(["h2", "h3", "h4", "a"], class_=re.compile(r"(name|title|clinic)", re.I))
-            if not name_tag:
-                continue
-            name = name_tag.get_text(strip=True)
-            if not name or len(name) < 4:
-                continue
-            phone_m    = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
-            addr_tag   = card.find(class_=re.compile(r"addr|address|location|area", re.I))
-            rating_tag = card.find(class_=re.compile(r"rating|star|score", re.I))
-            rows.append([
-                name, "Dental Clinic",
-                phone_m.group().strip() if phone_m else "", "", "",
-                addr_tag.get_text(strip=True) if addr_tag else city["city"],
-                city["city"], city["state"],
-                rating_tag.get_text(strip=True) if rating_tag else "",
-                "", url, now_ist(), "Clinicspots"
-            ])
-
-    log.info(f"  Clinicspots {city['city']} p{page}: {len(rows)} records | has_more={has_more}")
-    return rows, has_more
-
-
-# ============================================================
-#  SOURCE 3 — Practo (NEW)
+#  SOURCE 1 — Practo (requests)
 # ============================================================
 def scrape_practo(city, page=1):
-    # Confirmed URL: practo.com/{city}/clinics/dental-clinics?page=N
-    url  = f"https://www.practo.com/{city['pr']}/clinics/dental-clinics?page={page}"
-    html = get_html(url, extra_headers={
-        "Referer"          : "https://www.practo.com/",
-        "Accept"           : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "sec-fetch-site"   : "same-origin",
-        "sec-fetch-mode"   : "navigate",
-    })
+    base = "https://www.practo.com"
+    url  = f"{base}/{city['pr']}/clinics/dental-clinics?page={page}"
+    sess = new_session(f"{base}/{city['pr']}/clinics/dental-clinics")
+    if page == 1:
+        get_html_req(sess, f"{base}/{city['pr']}/clinics/dental-clinics", timeout=15)
+        time.sleep(random.uniform(1.5, 2.5))
+    html = get_html_req(sess, url)
     if not html:
         return [], False
-
-    soup     = BeautifulSoup(html, "html.parser")
-    rows     = parse_jsonld(soup, city, url, "Practo")
-    has_more = check_has_more_pr(soup, page)
-
-    # HTML fallback — Practo clinic cards
+    soup = BeautifulSoup(html, "html.parser")
+    rows = parse_jsonld(soup, city, url, "Practo")
     if not rows:
-        # Practo clinic listing cards usually have class containing 'listing' or 'clinic'
-        for card in soup.find_all("div", class_=re.compile(r"(listing-container|clinic-card|u-contain)", re.I)):
-            name_tag = card.find(["h2", "h3", "a"], class_=re.compile(r"(name|title|clinic-name)", re.I))
-            if not name_tag:
-                # Try any prominent link/heading inside card
-                name_tag = card.find(["h2", "h3"])
-            if not name_tag:
+        for card in soup.find_all("div", attrs={"data-qa-id": re.compile(r"clinic", re.I)}):
+            nt = card.find(["h2","h3"], attrs={"data-qa-id": re.compile(r"name", re.I)}) or card.find(["h2","h3"])
+            if not nt:
                 continue
-            name = name_tag.get_text(strip=True)
+            name = nt.get_text(strip=True)
             if not name or len(name) < 4:
                 continue
-            phone_m    = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
-            addr_tag   = card.find(class_=re.compile(r"addr|address|location|locality", re.I))
-            rating_tag = card.find(class_=re.compile(r"rating|star|score", re.I))
-            rows.append([
-                name, "Dental Clinic",
-                phone_m.group().strip() if phone_m else "", "", "",
-                addr_tag.get_text(strip=True) if addr_tag else city["city"],
+            at = card.find(attrs={"data-qa-id": re.compile(r"locality|address", re.I)})
+            rt = card.find(attrs={"data-qa-id": re.compile(r"rating", re.I)})
+            rows.append([name, "Dental Clinic", "", "", "",
+                at.get_text(strip=True) if at else city["city"],
                 city["city"], city["state"],
-                rating_tag.get_text(strip=True) if rating_tag else "",
-                "", url, now_ist(), "Practo"
-            ])
+                rt.get_text(strip=True) if rt else "", "",
+                url, now_ist(), "Practo"])
+    log.info(f"  Practo {city['city']} p{page}: {len(rows)}")
+    return rows, check_has_more(soup, page)
 
-    log.info(f"  Practo {city['city']} p{page}: {len(rows)} records | has_more={has_more}")
+
+# ============================================================
+#  SOURCE 2 — Clinicspots (requests)
+# ============================================================
+def scrape_clinicspots(city, page=1):
+    base = "https://www.clinicspots.com"
+    url  = f"{base}/dentist/{city['cs']}?page={page}"
+    sess = new_session(f"{base}/dentist/{city['cs']}")
+    html = get_html_req(sess, url)
+    if not html:
+        return [], False
+    soup = BeautifulSoup(html, "html.parser")
+    rows = parse_jsonld(soup, city, url, "Clinicspots")
+    if not rows:
+        for card in soup.find_all("div", class_=re.compile(r"(clinic|doctor|card|listing)", re.I)):
+            nt = card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|clinic)", re.I))
+            if not nt:
+                continue
+            name = nt.get_text(strip=True)
+            if not name or len(name) < 4:
+                continue
+            pm = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+            at = card.find(class_=re.compile(r"addr|address|location|area", re.I))
+            rt = card.find(class_=re.compile(r"rating|star|score", re.I))
+            rows.append([name, "Dental Clinic",
+                pm.group().strip() if pm else "", "", "",
+                at.get_text(strip=True) if at else city["city"],
+                city["city"], city["state"],
+                rt.get_text(strip=True) if rt else "", "",
+                url, now_ist(), "Clinicspots"])
+    log.info(f"  Clinicspots {city['city']} p{page}: {len(rows)}")
+    return rows, check_has_more(soup, page)
+
+
+# ============================================================
+#  SOURCE 3 — Sulekha (requests)
+# ============================================================
+def scrape_sulekha(city, page=1):
+    base = "https://www.sulekha.com"
+    url  = f"{base}/dentists/{city['sl']}?page={page}"
+    sess = new_session(f"{base}/dentists/{city['sl']}")
+    html = get_html_req(sess, url)
+    if not html:
+        return [], False
+    soup = BeautifulSoup(html, "html.parser")
+    rows = parse_jsonld(soup, city, url, "Sulekha")
+    if not rows:
+        for card in soup.find_all("div", class_=re.compile(r"(serv|listing|provider|biz|card)", re.I)):
+            nt = card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|biz|heading)", re.I)) or card.find(["h2","h3"])
+            if not nt:
+                continue
+            name = nt.get_text(strip=True)
+            if not name or len(name) < 4:
+                continue
+            pm = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+            at = card.find(class_=re.compile(r"addr|address|location|area|locality", re.I))
+            rt = card.find(class_=re.compile(r"rating|star|score|sulekha-score", re.I))
+            rows.append([name, "Dental Clinic",
+                pm.group().strip() if pm else "", "", "",
+                at.get_text(strip=True) if at else city["city"],
+                city["city"], city["state"],
+                rt.get_text(strip=True) if rt else "", "",
+                url, now_ist(), "Sulekha"])
+    log.info(f"  Sulekha {city['city']} p{page}: {len(rows)}")
+    return rows, check_has_more(soup, page)
+
+
+# ============================================================
+#  SOURCE 4 — JustDial (Playwright headless)
+#  JD heavily JS-rendered — requests se sirf blank HTML milta hai
+#  Playwright se real browser render hota hai → data milta hai
+# ============================================================
+
+# Global Playwright browser instance — ek baar launch, saari cities use karein
+_pw_browser = None
+_pw_context = None
+
+def get_pw_browser():
+    global _pw_browser, _pw_context, _pw_instance
+    if _pw_browser is None:
+        _pw_instance = sync_playwright().start()
+        _pw_browser  = _pw_instance.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",                 # GitHub Actions ke liye zaroori
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",      # /dev/shm small hota hai CI mein
+                "--disable-blink-features=AutomationControlled",  # bot detection bypass
+            ]
+        )
+        _pw_context = _pw_browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            locale="en-IN",
+            viewport={"width": 1280, "height": 800},
+            java_script_enabled=True,
+        )
+        # webdriver flag remove karo — bot detection bypass
+        _pw_context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+    return _pw_browser, _pw_context
+
+def close_pw_browser():
+    global _pw_browser, _pw_context, _pw_instance
+    if _pw_browser:
+        _pw_browser.close()
+        _pw_instance.stop()
+        _pw_browser = _pw_context = _pw_instance = None
+
+def scrape_justdial(city, page=1):
+    # JustDial URL format: justdial.com/{City}/Dentists/nct-10156331/page-{N}
+    page_slug = f"/page-{page}" if page > 1 else ""
+    url = f"https://www.justdial.com/{city['jd']}/Dentists/nct-10156331{page_slug}"
+
+    try:
+        _, ctx = get_pw_browser()
+        pg = ctx.new_page()
+
+        # JD ka anti-bot: pehle homepage visit karo
+        if page == 1:
+            pg.goto("https://www.justdial.com", timeout=30000)
+            pg.wait_for_timeout(random.randint(1500, 2500))
+
+        pg.goto(url, timeout=40000, wait_until="domcontentloaded")
+
+        # Listings load hone ka wait — JD dynamically inject karta hai cards
+        try:
+            pg.wait_for_selector("div.resultbox_info, li.cntanr, div[class*='resultbox']",
+                                 timeout=15000)
+        except PWTimeout:
+            log.warning(f"  JD {city['city']} p{page}: selector timeout — trying anyway")
+
+        # Scroll karo — lazy load ke liye
+        for _ in range(3):
+            pg.evaluate("window.scrollBy(0, window.innerHeight)")
+            pg.wait_for_timeout(800)
+
+        html = pg.content()
+        pg.close()
+
+    except Exception as e:
+        log.warning(f"  JD {city['city']} p{page} Playwright error: {e}")
+        return [], False
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows = []
+
+    # JustDial listing cards — multiple possible selectors
+    cards = (
+        soup.find_all("div", class_=re.compile(r"resultbox_info", re.I)) or
+        soup.find_all("li", class_=re.compile(r"cntanr", re.I)) or
+        soup.find_all("div", class_=re.compile(r"(jdcard|resultcard|listingbox)", re.I))
+    )
+
+    for card in cards:
+        # Name
+        nt = (card.find(class_=re.compile(r"resultbox_title|fn|comp-name|jd-name", re.I))
+              or card.find(["h2","h3","h4","a"]))
+        if not nt:
+            continue
+        name = nt.get_text(strip=True)
+        if not name or len(name) < 4:
+            continue
+
+        # Phone — JD encodes phones, try visible text
+        pm = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+
+        # Address
+        at = card.find(class_=re.compile(r"resultbox_address|address|adr|locality", re.I))
+
+        # Rating
+        rt = card.find(class_=re.compile(r"green-box|rating|star|score", re.I))
+
+        rows.append([
+            name, "Dental Clinic",
+            pm.group().strip() if pm else "", "", "",
+            at.get_text(strip=True) if at else city["city"],
+            city["city"], city["state"],
+            rt.get_text(strip=True) if rt else "", "",
+            url, now_ist(), "JustDial"
+        ])
+
+    # has_more: JD "next" button check
+    has_more = (page < MAX_PAGES and
+                bool(soup.find("a", attrs={"title": re.compile(r"next", re.I)}) or
+                     soup.find("a", href=re.compile(rf"page-{page+1}"))))
+
+    log.info(f"  JustDial {city['city']} p{page}: {len(rows)} | has_more={has_more}")
     return rows, has_more
 
 
@@ -363,7 +438,7 @@ def get_sheet():
         ws.append_row(HEADERS_ROW)
         ws.format("A1:M1", {
             "textFormat"     : {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-            "backgroundColor": {"red":0.1,"green":0.45,"blue":0.9}
+            "backgroundColor": {"red":0.1, "green":0.45, "blue":0.9}
         })
     return ws
 
@@ -385,8 +460,7 @@ def append_rows_to_sheet(ws, rows):
 #  MAIN
 # ============================================================
 def main():
-    log.info("=== Dental Scraper v5 Start ===")
-
+    log.info("=== Dental Scraper v8 Start ===")
     ws       = get_sheet()
     existing = get_existing_keys(ws)
     log.info(f"Sheet mein already {len(existing)} records hain")
@@ -399,59 +473,63 @@ def main():
     collected = 0
     batch     = []
 
-    while collected < DAILY_LIMIT:
-        if city_idx >= len(CITIES):
-            city_idx   = 0
-            source_idx = (source_idx + 1) % len(SOURCES)
-            page       = 1
-            log.info(f"  All cities done — switching to: {SOURCES[source_idx]}")
+    try:
+        while collected < DAILY_LIMIT:
+            if city_idx >= len(CITIES):
+                city_idx   = 0
+                source_idx = (source_idx + 1) % len(SOURCES)
+                page       = 1
+                log.info(f"  All cities done — switching to: {SOURCES[source_idx]}")
 
-        city   = CITIES[city_idx]
-        source = SOURCES[source_idx]
+            city   = CITIES[city_idx]
+            source = SOURCES[source_idx]
+            log.info(f"[{collected}/{DAILY_LIMIT}] {source} | {city['city']} | page {page}")
 
-        log.info(f"[{collected}/{DAILY_LIMIT}] {source} | {city['city']} | page {page}")
-
-        try:
-            if source == "indiamart":
-                rows, has_more = scrape_indiamart(city, page)
-            elif source == "clinicspots":
-                rows, has_more = scrape_clinicspots(city, page)
-            else:
-                rows, has_more = scrape_practo(city, page)
-        except Exception as e:
-            log.error(f"  ERROR: {e}")
-            city_idx += 1
-            page      = 1
-            time.sleep(3)
-            continue
-
-        for row in rows:
-            if collected >= DAILY_LIMIT:
-                break
-            key = make_key(str(row[0]), str(row[2]), str(row[5]))
-            if key in existing:
+            try:
+                if source == "practo":
+                    rows, has_more = scrape_practo(city, page)
+                elif source == "clinicspots":
+                    rows, has_more = scrape_clinicspots(city, page)
+                elif source == "sulekha":
+                    rows, has_more = scrape_sulekha(city, page)
+                else:
+                    rows, has_more = scrape_justdial(city, page)
+            except Exception as e:
+                log.error(f"  ERROR: {e}")
+                city_idx += 1
+                page      = 1
+                time.sleep(3)
                 continue
-            batch.append(row)
-            existing.add(key)
-            collected += 1
 
-        if len(batch) >= BATCH_SIZE:
+            for row in rows:
+                if collected >= DAILY_LIMIT:
+                    break
+                key = make_key(str(row[0]), str(row[2]), str(row[5]))
+                if key in existing:
+                    continue
+                batch.append(row)
+                existing.add(key)
+                collected += 1
+
+            if len(batch) >= BATCH_SIZE:
+                append_rows_to_sheet(ws, batch)
+                batch = []
+
+            if has_more and collected < DAILY_LIMIT:
+                page += 1
+                time.sleep(random.uniform(2.0, 4.0))
+            else:
+                page      = 1
+                city_idx += 1
+                time.sleep(random.uniform(3.0, 5.0))
+
+    finally:
+        # Playwright browser hamesha close karo — memory leak nahi hoga
+        close_pw_browser()
+        if batch:
             append_rows_to_sheet(ws, batch)
-            batch = []
-
-        if has_more and collected < DAILY_LIMIT:
-            page += 1
-            time.sleep(random.uniform(2.0, 4.0))
-        else:
-            page      = 1
-            city_idx += 1
-            time.sleep(random.uniform(3.0, 6.0))
-
-    if batch:
-        append_rows_to_sheet(ws, batch)
-
-    save_state({"city_idx": city_idx, "source_idx": source_idx, "page": page})
-    log.info(f"=== DONE | +{collected} aaj | Total known: {len(existing)} ===")
+        save_state({"city_idx": city_idx, "source_idx": source_idx, "page": page})
+        log.info(f"=== DONE | +{collected} aaj | Total known: {len(existing)} ===")
 
 
 if __name__ == "__main__":
