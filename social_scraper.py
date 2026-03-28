@@ -212,29 +212,64 @@ def pw_fetch(ctx, url, wait_sel=None, scroll=False, timeout=35000):
     finally:
         pg.close()
 
-# ─── DUCKDUCKGO SEARCH (no API) ─────────────────────────────
-def ddg_search(query, max_results=8):
+# ─── SEARCH — Bing (GitHub Actions pe kaam karta hai) ───────
+def search_urls(query, max_results=8):
+    """
+    Bing search — DuckDuckGo GitHub Actions pe block karta hai.
+    Bing publicly accessible hai, koi API key nahi chahiye.
+    """
+    import urllib.parse
     urls = []
+
+    # Method 1 — Bing
     try:
+        search_url = f"https://www.bing.com/search?q={urllib.parse.quote(query)}&count=10"
         r = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": USER_AGENTS[0], "Accept-Language": "en-IN"},
+            search_url,
+            headers={
+                "User-Agent" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
+                "Accept-Language": "en-IN,en;q=0.9",
+                "Accept"    : "text/html,application/xhtml+xml,*/*;q=0.8",
+            },
             timeout=20
         )
-        if r.status_code != 200:
-            return urls
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", class_=re.compile(r"result__url|result__a"), href=True):
-            href = a["href"]
-            if "uddg=" in href:
-                import urllib.parse
-                p    = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                href = p.get("uddg",[href])[0]
-            if href.startswith("http") and len(urls) < max_results:
-                urls.append(href)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href.startswith("http") and "bing.com" not in href and "microsoft.com" not in href:
+                    if len(urls) < max_results:
+                        urls.append(href)
     except Exception as e:
-        log.warning(f"  DDG search error: {e}")
+        log.warning(f"  Bing search error: {e}")
+
+    # Method 2 — Fallback: Google search (simple HTTP)
+    if not urls:
+        try:
+            search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num=10"
+            r = requests.get(
+                search_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-IN,en;q=0.9",
+                },
+                timeout=20
+            )
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    # Google results /url?q= format mein hote hain
+                    if "/url?q=" in href:
+                        actual = urllib.parse.parse_qs(
+                            urllib.parse.urlparse(href).query
+                        ).get("q", [""])[0]
+                        if actual.startswith("http") and len(urls) < max_results:
+                            urls.append(actual)
+        except Exception as e:
+            log.warning(f"  Google search error: {e}")
+
+    log.info(f"  Search results: {len(urls)} URLs found")
     return urls
 
 
@@ -293,8 +328,7 @@ def scrape_ig_profile(profile_url, city):
 def scrape_instagram_city(city, limit=10):
     query = f"dental clinic {city['city']} India site:instagram.com"
     log.info(f"  IG search: {query}")
-    urls  = ddg_search(query, max_results=12)
-    rows  = []
+    urls  = search_urls(query, max_results=12)    rows  = []
 
     for url in urls:
         if "instagram.com" not in url:
@@ -374,7 +408,7 @@ def scrape_fb_page(page_url, city):
 def scrape_facebook_city(city, limit=10):
     query = f"dental clinic {city['city']} India site:facebook.com"
     log.info(f"  FB search: {query}")
-    urls  = ddg_search(query, max_results=12)
+    urls  = search_urls(query, max_results=12)
     rows  = []
 
     for url in urls:
