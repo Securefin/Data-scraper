@@ -1,16 +1,16 @@
 """
-India Dental Clinic Scraper v8
+India Dental Clinic Scraper v9
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Root cause fix: Practo JS-rendered hai, requests se 0 results aate the.
+
 Sources:
-  requests (fast, no JS needed):
-    1. Practo      — practo.com/{city}/clinics/dental-clinics
-    2. Clinicspots  — clinicspots.com/dentist/{city}
-    3. Sulekha      — sulekha.com/dentists/{city}
+  Playwright (headless Chrome — JS sites):
+    1. Practo    — practo.com/{city}/clinics/dental-clinics
+    2. JustDial  — justdial.com/{City}/Dentists/nct-10156331
 
-  Playwright (headless Chrome, JS sites):
-    4. JustDial     — justdial.com/{City}/Dentists/nct-10156331
-
-GitHub Actions pe daily run — ubuntu-latest pe Chromium headless free mein chalta hai.
+  requests (fast — static HTML):
+    3. Clinicspots — clinicspots.com/dentist/{city}
+    4. Sulekha     — sulekha.com/dentists/{city}
 """
 
 import os, re, time, random, json, logging, hashlib
@@ -49,7 +49,6 @@ USER_AGENTS = [
 ]
 
 # ─── CITIES ─────────────────────────────────────────────────
-# jd = JustDial city slug (Title Case, exact)
 CITIES = [
     {"city":"Mumbai",             "state":"Maharashtra",    "cs":"mumbai",             "pr":"mumbai",             "sl":"mumbai",             "jd":"Mumbai"},
     {"city":"Delhi",              "state":"Delhi",          "cs":"delhi",              "pr":"delhi",              "sl":"delhi",              "jd":"Delhi"},
@@ -104,7 +103,7 @@ CITIES = [
     {"city":"Salem",              "state":"Tamil Nadu",     "cs":"salem",              "pr":"salem",              "sl":"salem",              "jd":"Salem"},
 ]
 
-SOURCES = ["practo", "clinicspots", "sulekha", "justdial"]
+SOURCES = ["practo", "justdial", "clinicspots", "sulekha"]
 
 # ─── STATE ──────────────────────────────────────────────────
 STATE_FILE = "state.json"
@@ -121,8 +120,7 @@ def save_state(s):
 
 # ─── UTILS ──────────────────────────────────────────────────
 def make_key(name, phone, address):
-    raw = f"{name}|{phone}|{address}".lower().strip()
-    return hashlib.md5(raw.encode()).hexdigest()
+    return hashlib.md5(f"{name}|{phone}|{address}".lower().strip().encode()).hexdigest()
 
 def now_ist():
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %H:%M")
@@ -130,13 +128,12 @@ def now_ist():
 def new_session(referer):
     s = requests.Session()
     s.headers.update({
-        "User-Agent"                : random.choice(USER_AGENTS),
-        "Accept"                    : "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Accept-Language"           : "en-IN,en;q=0.9",
-        "Accept-Encoding"           : "gzip, deflate, br",
-        "Referer"                   : referer,
-        "Connection"                : "keep-alive",
-        "Upgrade-Insecure-Requests" : "1",
+        "User-Agent"      : random.choice(USER_AGENTS),
+        "Accept"          : "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language" : "en-IN,en;q=0.9",
+        "Accept-Encoding" : "gzip, deflate, br",
+        "Referer"         : referer,
+        "Connection"      : "keep-alive",
     })
     return s
 
@@ -166,7 +163,8 @@ def get_html_req(session, url, timeout=25, retries=3):
     return None
 
 def parse_jsonld(soup, city, url, src):
-    rows, skip = [], {"WebPage","WebSite","BreadcrumbList","Organization","ItemList"}
+    rows = []
+    skip = {"WebPage","WebSite","BreadcrumbList","Organization","ItemList","SiteNavigationElement"}
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
             obj = json.loads(tag.string or "")
@@ -195,24 +193,90 @@ def check_has_more(soup, page, param="page"):
     return page < MAX_PAGES and bool(soup.find("a", href=re.compile(rf"[?&]{param}={page+1}")))
 
 
+# ─── PLAYWRIGHT BROWSER (shared instance) ───────────────────
+_pw_inst = _pw_browser = _pw_ctx = None
+
+def get_pw_ctx():
+    global _pw_inst, _pw_browser, _pw_ctx
+    if _pw_browser is None:
+        _pw_inst    = sync_playwright().start()
+        _pw_browser = _pw_inst.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-extensions",
+            ]
+        )
+        _pw_ctx = _pw_browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            locale="en-IN",
+            viewport={"width": 1280, "height": 800},
+        )
+        # webdriver flag hide karo
+        _pw_ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
+    return _pw_ctx
+
+def close_pw():
+    global _pw_inst, _pw_browser, _pw_ctx
+    if _pw_browser:
+        try:
+            _pw_browser.close()
+            _pw_inst.stop()
+        except Exception:
+            pass
+        _pw_inst = _pw_browser = _pw_ctx = None
+
+def pw_get_html(url, wait_selector=None, scroll=False, timeout=40000):
+    """Playwright se page ka rendered HTML lo."""
+    ctx = get_pw_ctx()
+    pg  = ctx.new_page()
+    try:
+        pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
+        if wait_selector:
+            try:
+                pg.wait_for_selector(wait_selector, timeout=15000)
+            except PWTimeout:
+                pass  # jo mila wo lo
+        if scroll:
+            for _ in range(3):
+                pg.evaluate("window.scrollBy(0, window.innerHeight)")
+                pg.wait_for_timeout(700)
+        return pg.content()
+    except Exception as e:
+        log.warning(f"  PW error: {e}")
+        return None
+    finally:
+        pg.close()
+
+
 # ============================================================
-#  SOURCE 1 — Practo (requests)
+#  SOURCE 1 — Practo (Playwright)
+#  JS-rendered hai — requests se blank milta tha
 # ============================================================
 def scrape_practo(city, page=1):
-    base = "https://www.practo.com"
-    url  = f"{base}/{city['pr']}/clinics/dental-clinics?page={page}"
-    sess = new_session(f"{base}/{city['pr']}/clinics/dental-clinics")
-    if page == 1:
-        get_html_req(sess, f"{base}/{city['pr']}/clinics/dental-clinics", timeout=15)
-        time.sleep(random.uniform(1.5, 2.5))
-    html = get_html_req(sess, url)
+    url = f"https://www.practo.com/{city['pr']}/clinics/dental-clinics?page={page}"
+    html = pw_get_html(
+        url,
+        wait_selector="div[data-qa-id='clinic_card'], div[class*='clinic'], h2",
+        scroll=True
+    )
     if not html:
         return [], False
+
     soup = BeautifulSoup(html, "html.parser")
     rows = parse_jsonld(soup, city, url, "Practo")
+
+    # HTML fallback — Practo rendered cards
     if not rows:
-        for card in soup.find_all("div", attrs={"data-qa-id": re.compile(r"clinic", re.I)}):
-            nt = card.find(["h2","h3"], attrs={"data-qa-id": re.compile(r"name", re.I)}) or card.find(["h2","h3"])
+        # data-qa-id based selectors
+        for card in soup.find_all("div", attrs={"data-qa-id": re.compile(r"clinic_card|clinic", re.I)}):
+            nt = (card.find(attrs={"data-qa-id": re.compile(r"clinic_name|name", re.I)})
+                  or card.find(["h2","h3"]))
             if not nt:
                 continue
             name = nt.get_text(strip=True)
@@ -225,12 +289,80 @@ def scrape_practo(city, page=1):
                 city["city"], city["state"],
                 rt.get_text(strip=True) if rt else "", "",
                 url, now_ist(), "Practo"])
+
+        # class-based fallback
+        if not rows:
+            for card in soup.find_all("div", class_=re.compile(r"clinic.card|listing|u-con", re.I)):
+                nt = card.find(["h2","h3","h4"])
+                if not nt:
+                    continue
+                name = nt.get_text(strip=True)
+                if not name or len(name) < 4:
+                    continue
+                at = card.find(class_=re.compile(r"addr|locality|location", re.I))
+                rt = card.find(class_=re.compile(r"rating|score", re.I))
+                rows.append([name, "Dental Clinic", "", "", "",
+                    at.get_text(strip=True) if at else city["city"],
+                    city["city"], city["state"],
+                    rt.get_text(strip=True) if rt else "", "",
+                    url, now_ist(), "Practo"])
+
     log.info(f"  Practo {city['city']} p{page}: {len(rows)}")
     return rows, check_has_more(soup, page)
 
 
 # ============================================================
-#  SOURCE 2 — Clinicspots (requests)
+#  SOURCE 2 — JustDial (Playwright)
+# ============================================================
+def scrape_justdial(city, page=1):
+    page_slug = f"/page-{page}" if page > 1 else ""
+    url = f"https://www.justdial.com/{city['jd']}/Dentists/nct-10156331{page_slug}"
+
+    html = pw_get_html(
+        url,
+        wait_selector="div.resultbox_info, li.cntanr, span.lng_cont_name",
+        scroll=True,
+        timeout=45000
+    )
+    if not html:
+        return [], False
+
+    soup  = BeautifulSoup(html, "html.parser")
+    rows  = []
+    cards = (
+        soup.find_all("div", class_=re.compile(r"resultbox_info", re.I)) or
+        soup.find_all("li",  class_=re.compile(r"cntanr", re.I)) or
+        soup.find_all("div", class_=re.compile(r"jdcard|resultcard", re.I))
+    )
+
+    for card in cards:
+        nt = (card.find(class_=re.compile(r"resultbox_title|fn|comp-name|lng_cont_name", re.I))
+              or card.find(["h2","h3","h4","a"]))
+        if not nt:
+            continue
+        name = nt.get_text(strip=True)
+        if not name or len(name) < 4:
+            continue
+        pm = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+        at = card.find(class_=re.compile(r"resultbox_address|address|adr|locality", re.I))
+        rt = card.find(class_=re.compile(r"green-box|rating|star|score", re.I))
+        rows.append([name, "Dental Clinic",
+            pm.group().strip() if pm else "", "", "",
+            at.get_text(strip=True) if at else city["city"],
+            city["city"], city["state"],
+            rt.get_text(strip=True) if rt else "", "",
+            url, now_ist(), "JustDial"])
+
+    has_more = (page < MAX_PAGES and
+                bool(soup.find("a", attrs={"title": re.compile(r"next", re.I)}) or
+                     soup.find("a", href=re.compile(rf"page-{page+1}"))))
+
+    log.info(f"  JustDial {city['city']} p{page}: {len(rows)}")
+    return rows, has_more
+
+
+# ============================================================
+#  SOURCE 3 — Clinicspots (requests)
 # ============================================================
 def scrape_clinicspots(city, page=1):
     base = "https://www.clinicspots.com"
@@ -263,7 +395,7 @@ def scrape_clinicspots(city, page=1):
 
 
 # ============================================================
-#  SOURCE 3 — Sulekha (requests)
+#  SOURCE 4 — Sulekha (requests)
 # ============================================================
 def scrape_sulekha(city, page=1):
     base = "https://www.sulekha.com"
@@ -276,7 +408,8 @@ def scrape_sulekha(city, page=1):
     rows = parse_jsonld(soup, city, url, "Sulekha")
     if not rows:
         for card in soup.find_all("div", class_=re.compile(r"(serv|listing|provider|biz|card)", re.I)):
-            nt = card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|biz|heading)", re.I)) or card.find(["h2","h3"])
+            nt = (card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|biz|heading)", re.I))
+                  or card.find(["h2","h3"]))
             if not nt:
                 continue
             name = nt.get_text(strip=True)
@@ -284,7 +417,7 @@ def scrape_sulekha(city, page=1):
                 continue
             pm = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
             at = card.find(class_=re.compile(r"addr|address|location|area|locality", re.I))
-            rt = card.find(class_=re.compile(r"rating|star|score|sulekha-score", re.I))
+            rt = card.find(class_=re.compile(r"rating|star|score", re.I))
             rows.append([name, "Dental Clinic",
                 pm.group().strip() if pm else "", "", "",
                 at.get_text(strip=True) if at else city["city"],
@@ -293,128 +426,6 @@ def scrape_sulekha(city, page=1):
                 url, now_ist(), "Sulekha"])
     log.info(f"  Sulekha {city['city']} p{page}: {len(rows)}")
     return rows, check_has_more(soup, page)
-
-
-# ============================================================
-#  SOURCE 4 — JustDial (Playwright headless)
-#  JD heavily JS-rendered — requests se sirf blank HTML milta hai
-#  Playwright se real browser render hota hai → data milta hai
-# ============================================================
-
-# Global Playwright browser instance — ek baar launch, saari cities use karein
-_pw_browser = None
-_pw_context = None
-
-def get_pw_browser():
-    global _pw_browser, _pw_context, _pw_instance
-    if _pw_browser is None:
-        _pw_instance = sync_playwright().start()
-        _pw_browser  = _pw_instance.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",                 # GitHub Actions ke liye zaroori
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",      # /dev/shm small hota hai CI mein
-                "--disable-blink-features=AutomationControlled",  # bot detection bypass
-            ]
-        )
-        _pw_context = _pw_browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            locale="en-IN",
-            viewport={"width": 1280, "height": 800},
-            java_script_enabled=True,
-        )
-        # webdriver flag remove karo — bot detection bypass
-        _pw_context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-    return _pw_browser, _pw_context
-
-def close_pw_browser():
-    global _pw_browser, _pw_context, _pw_instance
-    if _pw_browser:
-        _pw_browser.close()
-        _pw_instance.stop()
-        _pw_browser = _pw_context = _pw_instance = None
-
-def scrape_justdial(city, page=1):
-    # JustDial URL format: justdial.com/{City}/Dentists/nct-10156331/page-{N}
-    page_slug = f"/page-{page}" if page > 1 else ""
-    url = f"https://www.justdial.com/{city['jd']}/Dentists/nct-10156331{page_slug}"
-
-    try:
-        _, ctx = get_pw_browser()
-        pg = ctx.new_page()
-
-        # JD ka anti-bot: pehle homepage visit karo
-        if page == 1:
-            pg.goto("https://www.justdial.com", timeout=30000)
-            pg.wait_for_timeout(random.randint(1500, 2500))
-
-        pg.goto(url, timeout=40000, wait_until="domcontentloaded")
-
-        # Listings load hone ka wait — JD dynamically inject karta hai cards
-        try:
-            pg.wait_for_selector("div.resultbox_info, li.cntanr, div[class*='resultbox']",
-                                 timeout=15000)
-        except PWTimeout:
-            log.warning(f"  JD {city['city']} p{page}: selector timeout — trying anyway")
-
-        # Scroll karo — lazy load ke liye
-        for _ in range(3):
-            pg.evaluate("window.scrollBy(0, window.innerHeight)")
-            pg.wait_for_timeout(800)
-
-        html = pg.content()
-        pg.close()
-
-    except Exception as e:
-        log.warning(f"  JD {city['city']} p{page} Playwright error: {e}")
-        return [], False
-
-    soup = BeautifulSoup(html, "html.parser")
-    rows = []
-
-    # JustDial listing cards — multiple possible selectors
-    cards = (
-        soup.find_all("div", class_=re.compile(r"resultbox_info", re.I)) or
-        soup.find_all("li", class_=re.compile(r"cntanr", re.I)) or
-        soup.find_all("div", class_=re.compile(r"(jdcard|resultcard|listingbox)", re.I))
-    )
-
-    for card in cards:
-        # Name
-        nt = (card.find(class_=re.compile(r"resultbox_title|fn|comp-name|jd-name", re.I))
-              or card.find(["h2","h3","h4","a"]))
-        if not nt:
-            continue
-        name = nt.get_text(strip=True)
-        if not name or len(name) < 4:
-            continue
-
-        # Phone — JD encodes phones, try visible text
-        pm = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
-
-        # Address
-        at = card.find(class_=re.compile(r"resultbox_address|address|adr|locality", re.I))
-
-        # Rating
-        rt = card.find(class_=re.compile(r"green-box|rating|star|score", re.I))
-
-        rows.append([
-            name, "Dental Clinic",
-            pm.group().strip() if pm else "", "", "",
-            at.get_text(strip=True) if at else city["city"],
-            city["city"], city["state"],
-            rt.get_text(strip=True) if rt else "", "",
-            url, now_ist(), "JustDial"
-        ])
-
-    # has_more: JD "next" button check
-    has_more = (page < MAX_PAGES and
-                bool(soup.find("a", attrs={"title": re.compile(r"next", re.I)}) or
-                     soup.find("a", href=re.compile(rf"page-{page+1}"))))
-
-    log.info(f"  JustDial {city['city']} p{page}: {len(rows)} | has_more={has_more}")
-    return rows, has_more
 
 
 # ============================================================
@@ -460,7 +471,7 @@ def append_rows_to_sheet(ws, rows):
 #  MAIN
 # ============================================================
 def main():
-    log.info("=== Dental Scraper v8 Start ===")
+    log.info("=== Dental Scraper v9 Start ===")
     ws       = get_sheet()
     existing = get_existing_keys(ws)
     log.info(f"Sheet mein already {len(existing)} records hain")
@@ -488,12 +499,12 @@ def main():
             try:
                 if source == "practo":
                     rows, has_more = scrape_practo(city, page)
+                elif source == "justdial":
+                    rows, has_more = scrape_justdial(city, page)
                 elif source == "clinicspots":
                     rows, has_more = scrape_clinicspots(city, page)
-                elif source == "sulekha":
-                    rows, has_more = scrape_sulekha(city, page)
                 else:
-                    rows, has_more = scrape_justdial(city, page)
+                    rows, has_more = scrape_sulekha(city, page)
             except Exception as e:
                 log.error(f"  ERROR: {e}")
                 city_idx += 1
@@ -524,8 +535,7 @@ def main():
                 time.sleep(random.uniform(3.0, 5.0))
 
     finally:
-        # Playwright browser hamesha close karo — memory leak nahi hoga
-        close_pw_browser()
+        close_pw()
         if batch:
             append_rows_to_sheet(ws, batch)
         save_state({"city_idx": city_idx, "source_idx": source_idx, "page": page})
