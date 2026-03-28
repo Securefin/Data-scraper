@@ -48,13 +48,22 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
 
+      # Ubuntu 24.04 (Noble) pe libasound2 → libasound2t64 rename ho gaya
+      # --with-deps se conflict aata hai, isliye manually fix karte hain
+      - name: Fix Ubuntu 24.04 libasound2 issue
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libgbm1 libnss3 libxcomposite1 libxdamage1 \
+            libxfixes3 libxkbcommon0 libxrandr2 libpango-1.0-0 libcairo2
+
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install chromium --with-deps
+        run: playwright install chromium
 
       - name: Install Playwright system deps only (cache hit pe)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
+        run: echo "Cache hit — skipping browser download"
 
       # 6. Scraper run
       - name: Run scraper
