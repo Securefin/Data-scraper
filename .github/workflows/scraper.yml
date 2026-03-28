@@ -40,10 +40,21 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # 5. Playwright install — Chromium + system dependencies
-      #    (GitHub ubuntu-latest pe automatically kaam karta hai)
+      # 5. Playwright Chromium cache — pehli baar install hoga, baad mein cache se milega
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
       - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: playwright install chromium --with-deps
+
+      - name: Install Playwright system deps only (cache hit pe)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
 
       # 6. Scraper run
       - name: Run scraper
