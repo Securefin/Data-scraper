@@ -1,0 +1,51 @@
+name: Daily Dental Scraper
+
+on:
+  schedule:
+    - cron: "30 3 * * *"   # Roz 9:00 AM IST (UTC+5:30 = 3:30 UTC)
+  workflow_dispatch:         # Manual run bhi kar sakte ho anytime
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      # ── 1. Code checkout ──────────────────────────────────
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Python setup ───────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Dependencies install ───────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. State file restore (kal jahan choda tha) ───────
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: scraper-state-${{ github.run_number }}
+          restore-keys: scraper-state-
+
+      # ── 5. Scraper run ────────────────────────────────────
+      - name: Run scraper
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        run: python scraper.py
+
+      # ── 6. State save karo next run ke liye ──────────────
+      - name: Save state
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: scraper-state-${{ github.run_number }}
