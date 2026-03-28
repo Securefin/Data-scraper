@@ -1,16 +1,13 @@
 """
-India Dental Clinic Scraper v4
-Sources: IndiaMart + Clinicspots
+India Dental Clinic Scraper v5
+Sources: IndiaMart + Clinicspots + Practo
 GitHub Actions pe daily run hota hai
 
-v4 Fixes:
- - Better deduplication (MD5 hash: name + phone + address)
- - Timeout pe bhi retry hota hai (skip nahi)
- - has_more URL-based check (text-based nahi)
- - State cycle bug fix
- - Delay increase (2-4s) aur inter-city sleep
- - Email column note
- - Cleaner logging
+v5 Changes:
+ - FIX: IndiaMart URL  → dental-clinic.html  → dental-clinics.html  (plural)
+ - FIX: Clinicspots URL → /in/{city}/dentist  → /dentist/{city}
+ - NEW: Practo source added → practo.com/{city}/clinics/dental-clinics
+ - Practo JSON-LD + HTML fallback parser
 """
 
 import os, re, time, random, json, logging, hashlib
@@ -31,17 +28,17 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ─────────────────────────────────────────────────
-DAILY_LIMIT    = 200
-SHEET_NAME     = "Business Data"
-BATCH_SIZE     = 20
-IM_MAX_PAGES   = 8      # IndiaMart max pages per city
-CS_MAX_PAGES   = 10     # Clinicspots max pages per city
-HEADERS_ROW    = [
+DAILY_LIMIT   = 200
+SHEET_NAME    = "Business Data"
+BATCH_SIZE    = 20
+IM_MAX_PAGES  = 8
+CS_MAX_PAGES  = 10
+PR_MAX_PAGES  = 10
+HEADERS_ROW   = [
     "Name", "Category", "Phone", "Email*", "Website",
     "Address", "City", "State", "Rating", "Reviews",
     "Source URL", "Fetched On", "Source"
 ]
-# *Email: IndiaMart/Clinicspots publicly email nahi deta, column reserved hai
 
 # ─── USER AGENTS ────────────────────────────────────────────
 USER_AGENTS = [
@@ -53,61 +50,64 @@ USER_AGENTS = [
 ]
 
 # ─── ALL 50 CITIES ──────────────────────────────────────────
+# im  = IndiaMart slug
+# cs  = Clinicspots slug
+# pr  = Practo slug
 CITIES = [
-    {"city":"Mumbai",             "state":"Maharashtra",    "im":"mumbai",             "cs":"mumbai"},
-    {"city":"Delhi",              "state":"Delhi",          "im":"delhi",              "cs":"delhi"},
-    {"city":"Bangalore",          "state":"Karnataka",      "im":"bangalore",          "cs":"bangalore"},
-    {"city":"Hyderabad",          "state":"Telangana",      "im":"hyderabad",          "cs":"hyderabad"},
-    {"city":"Chennai",            "state":"Tamil Nadu",     "im":"chennai",            "cs":"chennai"},
-    {"city":"Kolkata",            "state":"West Bengal",    "im":"kolkata",            "cs":"kolkata"},
-    {"city":"Pune",               "state":"Maharashtra",    "im":"pune",               "cs":"pune"},
-    {"city":"Ahmedabad",          "state":"Gujarat",        "im":"ahmedabad",          "cs":"ahmedabad"},
-    {"city":"Jaipur",             "state":"Rajasthan",      "im":"jaipur",             "cs":"jaipur"},
-    {"city":"Lucknow",            "state":"Uttar Pradesh",  "im":"lucknow",            "cs":"lucknow"},
-    {"city":"Surat",              "state":"Gujarat",        "im":"surat",              "cs":"surat"},
-    {"city":"Kanpur",             "state":"Uttar Pradesh",  "im":"kanpur",             "cs":"kanpur"},
-    {"city":"Nagpur",             "state":"Maharashtra",    "im":"nagpur",             "cs":"nagpur"},
-    {"city":"Indore",             "state":"Madhya Pradesh", "im":"indore",             "cs":"indore"},
-    {"city":"Bhopal",             "state":"Madhya Pradesh", "im":"bhopal",             "cs":"bhopal"},
-    {"city":"Patna",              "state":"Bihar",          "im":"patna",              "cs":"patna"},
-    {"city":"Vadodara",           "state":"Gujarat",        "im":"vadodara",           "cs":"vadodara"},
-    {"city":"Ludhiana",           "state":"Punjab",         "im":"ludhiana",           "cs":"ludhiana"},
-    {"city":"Agra",               "state":"Uttar Pradesh",  "im":"agra",               "cs":"agra"},
-    {"city":"Nashik",             "state":"Maharashtra",    "im":"nashik",             "cs":"nashik"},
-    {"city":"Faridabad",          "state":"Haryana",        "im":"faridabad",          "cs":"faridabad"},
-    {"city":"Meerut",             "state":"Uttar Pradesh",  "im":"meerut",             "cs":"meerut"},
-    {"city":"Rajkot",             "state":"Gujarat",        "im":"rajkot",             "cs":"rajkot"},
-    {"city":"Varanasi",           "state":"Uttar Pradesh",  "im":"varanasi",           "cs":"varanasi"},
-    {"city":"Amritsar",           "state":"Punjab",         "im":"amritsar",           "cs":"amritsar"},
-    {"city":"Allahabad",          "state":"Uttar Pradesh",  "im":"allahabad",          "cs":"prayagraj"},
-    {"city":"Ranchi",             "state":"Jharkhand",      "im":"ranchi",             "cs":"ranchi"},
-    {"city":"Coimbatore",         "state":"Tamil Nadu",     "im":"coimbatore",         "cs":"coimbatore"},
-    {"city":"Gwalior",            "state":"Madhya Pradesh", "im":"gwalior",            "cs":"gwalior"},
-    {"city":"Vijayawada",         "state":"Andhra Pradesh", "im":"vijayawada",         "cs":"vijayawada"},
-    {"city":"Jodhpur",            "state":"Rajasthan",      "im":"jodhpur",            "cs":"jodhpur"},
-    {"city":"Raipur",             "state":"Chhattisgarh",   "im":"raipur",             "cs":"raipur"},
-    {"city":"Chandigarh",         "state":"Chandigarh",     "im":"chandigarh",         "cs":"chandigarh"},
-    {"city":"Mysore",             "state":"Karnataka",      "im":"mysore",             "cs":"mysore"},
-    {"city":"Bhubaneswar",        "state":"Odisha",         "im":"bhubaneswar",        "cs":"bhubaneswar"},
-    {"city":"Guwahati",           "state":"Assam",          "im":"guwahati",           "cs":"guwahati"},
-    {"city":"Kochi",              "state":"Kerala",         "im":"kochi",              "cs":"kochi"},
-    {"city":"Thiruvananthapuram", "state":"Kerala",         "im":"thiruvananthapuram", "cs":"thiruvananthapuram"},
-    {"city":"Visakhapatnam",      "state":"Andhra Pradesh", "im":"visakhapatnam",      "cs":"visakhapatnam"},
-    {"city":"Jalandhar",          "state":"Punjab",         "im":"jalandhar",          "cs":"jalandhar"},
-    {"city":"Madurai",            "state":"Tamil Nadu",     "im":"madurai",            "cs":"madurai"},
-    {"city":"Srinagar",           "state":"J&K",            "im":"srinagar",           "cs":"srinagar"},
-    {"city":"Aurangabad",         "state":"Maharashtra",    "im":"aurangabad",         "cs":"aurangabad"},
-    {"city":"Dehradun",           "state":"Uttarakhand",    "im":"dehradun",           "cs":"dehradun"},
-    {"city":"Jabalpur",           "state":"Madhya Pradesh", "im":"jabalpur",           "cs":"jabalpur"},
-    {"city":"Warangal",           "state":"Telangana",      "im":"warangal",           "cs":"warangal"},
-    {"city":"Hubli",              "state":"Karnataka",      "im":"hubli",              "cs":"hubli"},
-    {"city":"Tiruchirappalli",    "state":"Tamil Nadu",     "im":"tiruchirappalli",    "cs":"tiruchirappalli"},
-    {"city":"Bareilly",           "state":"Uttar Pradesh",  "im":"bareilly",           "cs":"bareilly"},
-    {"city":"Moradabad",          "state":"Uttar Pradesh",  "im":"moradabad",          "cs":"moradabad"},
-    {"city":"Salem",              "state":"Tamil Nadu",     "im":"salem",              "cs":"salem"},
+    {"city":"Mumbai",             "state":"Maharashtra",    "im":"mumbai",             "cs":"mumbai",             "pr":"mumbai"},
+    {"city":"Delhi",              "state":"Delhi",          "im":"delhi",              "cs":"delhi",              "pr":"delhi"},
+    {"city":"Bangalore",          "state":"Karnataka",      "im":"bangalore",          "cs":"bangalore",          "pr":"bangalore"},
+    {"city":"Hyderabad",          "state":"Telangana",      "im":"hyderabad",          "cs":"hyderabad",          "pr":"hyderabad"},
+    {"city":"Chennai",            "state":"Tamil Nadu",     "im":"chennai",            "cs":"chennai",            "pr":"chennai"},
+    {"city":"Kolkata",            "state":"West Bengal",    "im":"kolkata",            "cs":"kolkata",            "pr":"kolkata"},
+    {"city":"Pune",               "state":"Maharashtra",    "im":"pune",               "cs":"pune",               "pr":"pune"},
+    {"city":"Ahmedabad",          "state":"Gujarat",        "im":"ahmedabad",          "cs":"ahmedabad",          "pr":"ahmedabad"},
+    {"city":"Jaipur",             "state":"Rajasthan",      "im":"jaipur",             "cs":"jaipur",             "pr":"jaipur"},
+    {"city":"Lucknow",            "state":"Uttar Pradesh",  "im":"lucknow",            "cs":"lucknow",            "pr":"lucknow"},
+    {"city":"Surat",              "state":"Gujarat",        "im":"surat",              "cs":"surat",              "pr":"surat"},
+    {"city":"Kanpur",             "state":"Uttar Pradesh",  "im":"kanpur",             "cs":"kanpur",             "pr":"kanpur"},
+    {"city":"Nagpur",             "state":"Maharashtra",    "im":"nagpur",             "cs":"nagpur",             "pr":"nagpur"},
+    {"city":"Indore",             "state":"Madhya Pradesh", "im":"indore",             "cs":"indore",             "pr":"indore"},
+    {"city":"Bhopal",             "state":"Madhya Pradesh", "im":"bhopal",             "cs":"bhopal",             "pr":"bhopal"},
+    {"city":"Patna",              "state":"Bihar",          "im":"patna",              "cs":"patna",              "pr":"patna"},
+    {"city":"Vadodara",           "state":"Gujarat",        "im":"vadodara",           "cs":"vadodara",           "pr":"vadodara"},
+    {"city":"Ludhiana",           "state":"Punjab",         "im":"ludhiana",           "cs":"ludhiana",           "pr":"ludhiana"},
+    {"city":"Agra",               "state":"Uttar Pradesh",  "im":"agra",               "cs":"agra",               "pr":"agra"},
+    {"city":"Nashik",             "state":"Maharashtra",    "im":"nashik",             "cs":"nashik",             "pr":"nashik"},
+    {"city":"Faridabad",          "state":"Haryana",        "im":"faridabad",          "cs":"faridabad",          "pr":"faridabad"},
+    {"city":"Meerut",             "state":"Uttar Pradesh",  "im":"meerut",             "cs":"meerut",             "pr":"meerut"},
+    {"city":"Rajkot",             "state":"Gujarat",        "im":"rajkot",             "cs":"rajkot",             "pr":"rajkot"},
+    {"city":"Varanasi",           "state":"Uttar Pradesh",  "im":"varanasi",           "cs":"varanasi",           "pr":"varanasi"},
+    {"city":"Amritsar",           "state":"Punjab",         "im":"amritsar",           "cs":"amritsar",           "pr":"amritsar"},
+    {"city":"Allahabad",          "state":"Uttar Pradesh",  "im":"allahabad",          "cs":"prayagraj",          "pr":"allahabad"},
+    {"city":"Ranchi",             "state":"Jharkhand",      "im":"ranchi",             "cs":"ranchi",             "pr":"ranchi"},
+    {"city":"Coimbatore",         "state":"Tamil Nadu",     "im":"coimbatore",         "cs":"coimbatore",         "pr":"coimbatore"},
+    {"city":"Gwalior",            "state":"Madhya Pradesh", "im":"gwalior",            "cs":"gwalior",            "pr":"gwalior"},
+    {"city":"Vijayawada",         "state":"Andhra Pradesh", "im":"vijayawada",         "cs":"vijayawada",         "pr":"vijayawada"},
+    {"city":"Jodhpur",            "state":"Rajasthan",      "im":"jodhpur",            "cs":"jodhpur",            "pr":"jodhpur"},
+    {"city":"Raipur",             "state":"Chhattisgarh",   "im":"raipur",             "cs":"raipur",             "pr":"raipur"},
+    {"city":"Chandigarh",         "state":"Chandigarh",     "im":"chandigarh",         "cs":"chandigarh",         "pr":"chandigarh"},
+    {"city":"Mysore",             "state":"Karnataka",      "im":"mysore",             "cs":"mysore",             "pr":"mysore"},
+    {"city":"Bhubaneswar",        "state":"Odisha",         "im":"bhubaneswar",        "cs":"bhubaneswar",        "pr":"bhubaneswar"},
+    {"city":"Guwahati",           "state":"Assam",          "im":"guwahati",           "cs":"guwahati",           "pr":"guwahati"},
+    {"city":"Kochi",              "state":"Kerala",         "im":"kochi",              "cs":"kochi",              "pr":"kochi"},
+    {"city":"Thiruvananthapuram", "state":"Kerala",         "im":"thiruvananthapuram", "cs":"thiruvananthapuram", "pr":"thiruvananthapuram"},
+    {"city":"Visakhapatnam",      "state":"Andhra Pradesh", "im":"visakhapatnam",      "cs":"visakhapatnam",      "pr":"visakhapatnam"},
+    {"city":"Jalandhar",          "state":"Punjab",         "im":"jalandhar",          "cs":"jalandhar",          "pr":"jalandhar"},
+    {"city":"Madurai",            "state":"Tamil Nadu",     "im":"madurai",            "cs":"madurai",            "pr":"madurai"},
+    {"city":"Srinagar",           "state":"J&K",            "im":"srinagar",           "cs":"srinagar",           "pr":"srinagar"},
+    {"city":"Aurangabad",         "state":"Maharashtra",    "im":"aurangabad",         "cs":"aurangabad",         "pr":"aurangabad"},
+    {"city":"Dehradun",           "state":"Uttarakhand",    "im":"dehradun",           "cs":"dehradun",           "pr":"dehradun"},
+    {"city":"Jabalpur",           "state":"Madhya Pradesh", "im":"jabalpur",           "cs":"jabalpur",           "pr":"jabalpur"},
+    {"city":"Warangal",           "state":"Telangana",      "im":"warangal",           "cs":"warangal",           "pr":"warangal"},
+    {"city":"Hubli",              "state":"Karnataka",      "im":"hubli",              "cs":"hubli",              "pr":"hubli"},
+    {"city":"Tiruchirappalli",    "state":"Tamil Nadu",     "im":"tiruchirappalli",    "cs":"tiruchirappalli",    "pr":"tiruchirappalli"},
+    {"city":"Bareilly",           "state":"Uttar Pradesh",  "im":"bareilly",           "cs":"bareilly",           "pr":"bareilly"},
+    {"city":"Moradabad",          "state":"Uttar Pradesh",  "im":"moradabad",          "cs":"moradabad",          "pr":"moradabad"},
+    {"city":"Salem",              "state":"Tamil Nadu",     "im":"salem",              "cs":"salem",              "pr":"salem"},
 ]
 
-SOURCES = ["indiamart", "clinicspots"]
+SOURCES = ["indiamart", "clinicspots", "practo"]
 
 # ─── STATE ──────────────────────────────────────────────────
 STATE_FILE = "state.json"
@@ -124,10 +124,6 @@ def save_state(s):
 
 # ─── DEDUPLICATION ──────────────────────────────────────────
 def make_key(name: str, phone: str, address: str) -> str:
-    """
-    FIX: Pehle sirf name+address tha — ab name+phone+address tino ka
-    MD5 hash use hota hai. Duplicate accurate detect hoga.
-    """
     raw = f"{name}|{phone}|{address}".lower().strip()
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
@@ -154,62 +150,42 @@ def get_html(url, extra_headers=None, timeout=25, retries=3):
                 wait = (attempt + 1) * 6
                 log.warning(f"  {r.status_code} — retry in {wait}s")
                 time.sleep(wait)
-
         except requests.exceptions.Timeout:
-            # FIX: Pehle ye seedha return None karta tha (no retry).
-            # Ab retry hoga — sirf last attempt pe skip karega.
             wait = (attempt + 1) * 3
             log.warning(f"  Timeout (attempt {attempt+1}/{retries}) — wait {wait}s")
             if attempt < retries - 1:
                 time.sleep(wait)
             else:
-                log.warning("  Max retries on timeout — skipping URL")
+                log.warning("  Max retries on timeout — skipping")
                 return None
-
         except Exception as e:
             log.warning(f"  Error: {e} — retry {attempt+1}/{retries}")
             time.sleep(3)
-
     return None
 
 def now_ist():
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %H:%M")
 
-# ─── has_more HELPER ────────────────────────────────────────
-def check_has_more_im(soup, page: int) -> bool:
-    """
-    FIX: Pehle soup.find("a", string="Next") tha — ye fragile tha.
-    Ab next page ka URL directly check hota hai href mein.
-    """
+# ─── has_more HELPERS ───────────────────────────────────────
+def check_has_more_im(soup, page):
     if page >= IM_MAX_PAGES:
         return False
-    next_page = page + 1
-    found = soup.find("a", href=re.compile(rf"[?&]bpg={next_page}"))
-    return bool(found)
+    return bool(soup.find("a", href=re.compile(rf"[?&]bpg={page+1}")))
 
-def check_has_more_cs(soup, page: int) -> bool:
-    """Same fix for Clinicspots — page= param check."""
+def check_has_more_cs(soup, page):
     if page >= CS_MAX_PAGES:
         return False
-    next_page = page + 1
-    found = soup.find("a", href=re.compile(rf"[?&]page={next_page}"))
-    return bool(found)
+    return bool(soup.find("a", href=re.compile(rf"[?&]page={page+1}")))
 
+def check_has_more_pr(soup, page):
+    if page >= PR_MAX_PAGES:
+        return False
+    # Practo uses ?page=N in pagination links
+    return bool(soup.find("a", href=re.compile(rf"[?&]page={page+1}")))
 
-# ============================================================
-#  SOURCE 1 — IndiaMart Directory
-# ============================================================
-def scrape_indiamart(city, page=1):
-    url  = f"https://dir.indiamart.com/{city['im']}/dental-clinics.html?bpg={page}"
-    html = get_html(url, extra_headers={"Referer": "https://dir.indiamart.com/"})
-    if not html:
-        return [], False
-
-    soup     = BeautifulSoup(html, "html.parser")
-    rows     = []
-    has_more = check_has_more_im(soup, page)  # FIX: URL-based check
-
-    # Method 1 — JSON-LD
+# ─── JSON-LD PARSER (shared) ────────────────────────────────
+def parse_jsonld(soup, city, source_url, source_name):
+    rows = []
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
             obj   = json.loads(tag.string or "")
@@ -223,8 +199,10 @@ def scrape_indiamart(city, page=1):
                 if item.get("@type", "") in ("WebPage", "WebSite", "BreadcrumbList", "Organization"):
                     continue
                 addr    = item.get("address", {})
-                phone   = item.get("telephone", "")
-                address = (addr.get("streetAddress", "") + " " + addr.get("addressLocality", "")).strip()
+                phone   = str(item.get("telephone", ""))
+                street  = addr.get("streetAddress", "")
+                locality= addr.get("addressLocality", "")
+                address = (street + " " + locality).strip() or city["city"]
                 rows.append([
                     name, "Dental Clinic",
                     phone, "",
@@ -233,12 +211,28 @@ def scrape_indiamart(city, page=1):
                     city["city"], city["state"],
                     item.get("aggregateRating", {}).get("ratingValue", ""),
                     item.get("aggregateRating", {}).get("reviewCount", ""),
-                    url, now_ist(), "IndiaMart"
+                    source_url, now_ist(), source_name
                 ])
         except Exception:
             pass
+    return rows
 
-    # Method 2 — HTML fallback
+
+# ============================================================
+#  SOURCE 1 — IndiaMart Directory
+# ============================================================
+def scrape_indiamart(city, page=1):
+    # FIX v4: dental-clinic → dental-clinics (plural)
+    url  = f"https://dir.indiamart.com/{city['im']}/dental-clinics.html?bpg={page}"
+    html = get_html(url, extra_headers={"Referer": "https://dir.indiamart.com/"})
+    if not html:
+        return [], False
+
+    soup     = BeautifulSoup(html, "html.parser")
+    rows     = parse_jsonld(soup, city, url, "IndiaMart")
+    has_more = check_has_more_im(soup, page)
+
+    # HTML fallback
     if not rows:
         for card in soup.find_all("div", class_=re.compile(r"(card|listing|company|bname|imprd)", re.I)):
             name_tag = card.find(["h2", "h3", "a"], class_=re.compile(r"(name|title|bname|company)", re.I))
@@ -247,14 +241,12 @@ def scrape_indiamart(city, page=1):
             name = name_tag.get_text(strip=True)
             if not name or len(name) < 4:
                 continue
-            phone_match = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
-            addr_tag    = card.find(class_=re.compile(r"addr|address|location", re.I))
-            phone       = phone_match.group().strip() if phone_match else ""
-            address     = addr_tag.get_text(strip=True) if addr_tag else city["city"]
+            phone_m  = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+            addr_tag = card.find(class_=re.compile(r"addr|address|location", re.I))
             rows.append([
                 name, "Dental Clinic",
-                phone, "", "",
-                address,
+                phone_m.group().strip() if phone_m else "", "", "",
+                addr_tag.get_text(strip=True) if addr_tag else city["city"],
                 city["city"], city["state"],
                 "", "", url, now_ist(), "IndiaMart"
             ])
@@ -267,45 +259,17 @@ def scrape_indiamart(city, page=1):
 #  SOURCE 2 — Clinicspots
 # ============================================================
 def scrape_clinicspots(city, page=1):
-    url  = f"https://www.clinicspots.com/in/{city['cs']}/dentist?page={page}"
+    # FIX v5: /in/{city}/dentist → /dentist/{city}
+    url  = f"https://www.clinicspots.com/dentist/{city['cs']}?page={page}"
     html = get_html(url, extra_headers={"Referer": "https://www.clinicspots.com/"})
     if not html:
         return [], False
 
     soup     = BeautifulSoup(html, "html.parser")
-    rows     = []
-    has_more = check_has_more_cs(soup, page)  # FIX: URL-based check
+    rows     = parse_jsonld(soup, city, url, "Clinicspots")
+    has_more = check_has_more_cs(soup, page)
 
-    # Method 1 — JSON-LD
-    for tag in soup.find_all("script", type="application/ld+json"):
-        try:
-            obj   = json.loads(tag.string or "")
-            items = obj.get("@graph", [obj] if isinstance(obj, dict) else obj)
-            if isinstance(items, dict):
-                items = [items]
-            for item in items:
-                name = item.get("name", "").strip()
-                if not name or len(name) < 4:
-                    continue
-                if item.get("@type", "") in ("WebPage", "WebSite", "BreadcrumbList"):
-                    continue
-                addr    = item.get("address", {})
-                phone   = item.get("telephone", "")
-                address = (addr.get("streetAddress", "") + ", " + addr.get("addressLocality", "")).strip(", ")
-                rows.append([
-                    name, "Dental Clinic",
-                    phone, "",
-                    item.get("url", ""),
-                    address,
-                    city["city"], city["state"],
-                    item.get("aggregateRating", {}).get("ratingValue", ""),
-                    item.get("aggregateRating", {}).get("reviewCount", ""),
-                    url, now_ist(), "Clinicspots"
-                ])
-        except Exception:
-            pass
-
-    # Method 2 — HTML fallback
+    # HTML fallback
     if not rows:
         for card in soup.find_all("div", class_=re.compile(r"(clinic|doctor|provider|card|listing)", re.I)):
             name_tag = card.find(["h2", "h3", "h4", "a"], class_=re.compile(r"(name|title|clinic)", re.I))
@@ -314,21 +278,67 @@ def scrape_clinicspots(city, page=1):
             name = name_tag.get_text(strip=True)
             if not name or len(name) < 4:
                 continue
-            phone_match = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
-            addr_tag    = card.find(class_=re.compile(r"addr|address|location|area", re.I))
-            rating_tag  = card.find(class_=re.compile(r"rating|star|score", re.I))
-            phone       = phone_match.group().strip() if phone_match else ""
-            address     = addr_tag.get_text(strip=True) if addr_tag else city["city"]
+            phone_m    = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+            addr_tag   = card.find(class_=re.compile(r"addr|address|location|area", re.I))
+            rating_tag = card.find(class_=re.compile(r"rating|star|score", re.I))
             rows.append([
                 name, "Dental Clinic",
-                phone, "", "",
-                address,
+                phone_m.group().strip() if phone_m else "", "", "",
+                addr_tag.get_text(strip=True) if addr_tag else city["city"],
                 city["city"], city["state"],
                 rating_tag.get_text(strip=True) if rating_tag else "",
                 "", url, now_ist(), "Clinicspots"
             ])
 
     log.info(f"  Clinicspots {city['city']} p{page}: {len(rows)} records | has_more={has_more}")
+    return rows, has_more
+
+
+# ============================================================
+#  SOURCE 3 — Practo (NEW)
+# ============================================================
+def scrape_practo(city, page=1):
+    # Confirmed URL: practo.com/{city}/clinics/dental-clinics?page=N
+    url  = f"https://www.practo.com/{city['pr']}/clinics/dental-clinics?page={page}"
+    html = get_html(url, extra_headers={
+        "Referer"          : "https://www.practo.com/",
+        "Accept"           : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "sec-fetch-site"   : "same-origin",
+        "sec-fetch-mode"   : "navigate",
+    })
+    if not html:
+        return [], False
+
+    soup     = BeautifulSoup(html, "html.parser")
+    rows     = parse_jsonld(soup, city, url, "Practo")
+    has_more = check_has_more_pr(soup, page)
+
+    # HTML fallback — Practo clinic cards
+    if not rows:
+        # Practo clinic listing cards usually have class containing 'listing' or 'clinic'
+        for card in soup.find_all("div", class_=re.compile(r"(listing-container|clinic-card|u-contain)", re.I)):
+            name_tag = card.find(["h2", "h3", "a"], class_=re.compile(r"(name|title|clinic-name)", re.I))
+            if not name_tag:
+                # Try any prominent link/heading inside card
+                name_tag = card.find(["h2", "h3"])
+            if not name_tag:
+                continue
+            name = name_tag.get_text(strip=True)
+            if not name or len(name) < 4:
+                continue
+            phone_m    = re.search(r"[\+\d][\d\s\-]{9,14}", card.get_text())
+            addr_tag   = card.find(class_=re.compile(r"addr|address|location|locality", re.I))
+            rating_tag = card.find(class_=re.compile(r"rating|star|score", re.I))
+            rows.append([
+                name, "Dental Clinic",
+                phone_m.group().strip() if phone_m else "", "", "",
+                addr_tag.get_text(strip=True) if addr_tag else city["city"],
+                city["city"], city["state"],
+                rating_tag.get_text(strip=True) if rating_tag else "",
+                "", url, now_ist(), "Practo"
+            ])
+
+    log.info(f"  Practo {city['city']} p{page}: {len(rows)} records | has_more={has_more}")
     return rows, has_more
 
 
@@ -358,17 +368,10 @@ def get_sheet():
     return ws
 
 def get_existing_keys(ws):
-    """
-    FIX: Pehle name+address ka simple string tha.
-    Ab name+phone+address ka MD5 hash use hota hai — same make_key() function.
-    """
     keys = set()
     for row in ws.get_all_values()[1:]:
         if len(row) >= 6:
-            name    = row[0]
-            phone   = row[2] if len(row) > 2 else ""
-            address = row[5]
-            k = make_key(name, phone, address)
+            k = make_key(row[0], row[2] if len(row) > 2 else "", row[5])
             keys.add(k)
     return keys
 
@@ -382,7 +385,7 @@ def append_rows_to_sheet(ws, rows):
 #  MAIN
 # ============================================================
 def main():
-    log.info("=== Dental Scraper v4 Start ===")
+    log.info("=== Dental Scraper v5 Start ===")
 
     ws       = get_sheet()
     existing = get_existing_keys(ws)
@@ -397,12 +400,11 @@ def main():
     batch     = []
 
     while collected < DAILY_LIMIT:
-        # FIX: city cycle complete hone pe source advance karo
         if city_idx >= len(CITIES):
             city_idx   = 0
             source_idx = (source_idx + 1) % len(SOURCES)
             page       = 1
-            log.info(f"  All cities done — switching to source: {SOURCES[source_idx]}")
+            log.info(f"  All cities done — switching to: {SOURCES[source_idx]}")
 
         city   = CITIES[city_idx]
         source = SOURCES[source_idx]
@@ -412,8 +414,10 @@ def main():
         try:
             if source == "indiamart":
                 rows, has_more = scrape_indiamart(city, page)
-            else:
+            elif source == "clinicspots":
                 rows, has_more = scrape_clinicspots(city, page)
+            else:
+                rows, has_more = scrape_practo(city, page)
         except Exception as e:
             log.error(f"  ERROR: {e}")
             city_idx += 1
@@ -424,7 +428,6 @@ def main():
         for row in rows:
             if collected >= DAILY_LIMIT:
                 break
-            # FIX: MD5-based deduplication
             key = make_key(str(row[0]), str(row[2]), str(row[5]))
             if key in existing:
                 continue
@@ -438,19 +441,15 @@ def main():
 
         if has_more and collected < DAILY_LIMIT:
             page += 1
-            # FIX: Page ke beech delay thoda zyada (2-4s)
             time.sleep(random.uniform(2.0, 4.0))
         else:
             page      = 1
             city_idx += 1
-            # FIX: City switch pe extra sleep — block hone ka risk kam hoga
             time.sleep(random.uniform(3.0, 6.0))
 
-    # Remaining batch flush
     if batch:
         append_rows_to_sheet(ws, batch)
 
-    # FIX: State save karo — cycle bug nahi aayega next run pe
     save_state({"city_idx": city_idx, "source_idx": source_idx, "page": page})
     log.info(f"=== DONE | +{collected} aaj | Total known: {len(existing)} ===")
 
