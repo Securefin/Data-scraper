@@ -65,12 +65,19 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: echo "Cache hit — skipping browser download"
 
-      # 6. Scraper run
-      - name: Run scraper
+      # 6. Main scraper run (Practo, JustDial, Clinicspots, Sulekha)
+      - name: Run main scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: python scraper.py
+
+      # 7. Social media scraper run (Facebook + Instagram)
+      - name: Run social media scraper
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        run: python social_scraper.py
 
       # 7. State file save (next run ke liye)
       - name: Save state
