@@ -120,6 +120,14 @@ def save_state(s):
 def make_key(name, phone, address):
     return hashlib.md5(f"{name}|{phone}|{address}".lower().strip().encode()).hexdigest()
 
+def make_website_key(website):
+    """Same website wale duplicates avoid karo."""
+    if not website:
+        return ""
+    # Domain nikalo — https://www.clinic.com/page → clinic.com
+    m = re.search(r"https?://(?:www\.)?([^/]+)", website.lower())
+    return m.group(1) if m else website.lower().strip()
+
 def now_ist():
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %H:%M")
 
@@ -340,11 +348,27 @@ def scrape_googlemaps(city, page=1):
                 if addr_el:
                     address = addr_el.inner_text().strip() or city["city"]
 
-                # Website
+                # Website — har clinic ka alag hona chahiye
                 website = ""
-                web_el  = pg.query_selector("a[data-tooltip='Open website'], a[aria-label*='website']")
-                if web_el:
-                    website = web_el.get_attribute("href") or ""
+                try:
+                    web_el = pg.query_selector(
+                        "a[data-tooltip='Open website'], "
+                        "a[aria-label*='website'], "
+                        "a[data-item-id='authority']"
+                    )
+                    if web_el:
+                        href = web_el.get_attribute("href") or ""
+                        # Google Maps redirect URLs clean karo
+                        # Format: /url?q=https://clinic.com&...
+                        if "/url?q=" in href:
+                            import urllib.parse
+                            website = urllib.parse.parse_qs(
+                                urllib.parse.urlparse(href).query
+                            ).get("q", [""])[0]
+                        elif href.startswith("http") and "google.com" not in href:
+                            website = href
+                except Exception:
+                    website = ""
 
                 # Rating
                 rating = ""
@@ -512,6 +536,7 @@ def main():
 
     collected = 0
     batch     = []
+    seen_websites = set()  # same website baar baar save nahi hogi
 
     try:
         while collected < DAILY_LIMIT:
@@ -542,11 +567,20 @@ def main():
             for row in rows:
                 if collected >= DAILY_LIMIT:
                     break
-                key = make_key(str(row[0]), str(row[2]), str(row[5]))
+                key     = make_key(str(row[0]), str(row[2]), str(row[5]))
+                web_key = make_website_key(str(row[4]))
+
+                # Duplicate check — name+phone+address ya same website
                 if key in existing:
                     continue
+                if web_key and web_key in seen_websites:
+                    log.info(f"    Skip duplicate website: {web_key}")
+                    continue
+
                 batch.append(row)
                 existing.add(key)
+                if web_key:
+                    seen_websites.add(web_key)
                 collected += 1
 
             if len(batch) >= BATCH_SIZE:
