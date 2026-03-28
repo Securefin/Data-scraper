@@ -1,17 +1,16 @@
 """
-India Dental Clinic Scraper v10
+India Dental Clinic Scraper v11
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Practo REMOVED — virtual landline numbers deta tha, WhatsApp pe kaam nahi karte.
-
 Sources:
-  Playwright (JS-rendered):
-    1. JustDial  — justdial.com/{City}/Dentists — REAL mobile numbers ✅
+  1. Google Maps  — maps.google.com (NO API KEY) — real mobile numbers ✅
+  2. Sulekha      — sulekha.com/dentists/{city}
+  3. Clinicspots  — clinicspots.com/dentist/{city}
 
-  requests (static HTML):
-    2. Sulekha    — sulekha.com/dentists/{city} — mobile numbers mostly ✅
-    3. Clinicspots — clinicspots.com/dentist/{city}
-
-Mobile number filter bhi add kiya hai — sirf 10-digit mobile (6/7/8/9 se shuru) save hoga.
+Google Maps se:
+  - Real phone numbers (mobile + landline dono)
+  - Website URL (blank = hot lead)
+  - Address, Rating, Reviews
+  - Koi API key nahi chahiye
 """
 
 import os, re, time, random, json, logging, hashlib
@@ -24,7 +23,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ─── LOGGING ────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -36,7 +34,7 @@ log = logging.getLogger(__name__)
 DAILY_LIMIT  = 200
 SHEET_NAME   = "Business Data"
 BATCH_SIZE   = 20
-MAX_PAGES    = 10
+MAX_PAGES    = 5     # Google Maps pe zyada pages nahi hote
 HEADERS_ROW  = [
     "Name", "Category", "Phone", "Email", "Website",
     "Address", "City", "State", "Rating", "Reviews",
@@ -49,63 +47,61 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
 ]
 
-# ─── CITIES ─────────────────────────────────────────────────
 CITIES = [
-    {"city":"Mumbai",             "state":"Maharashtra",    "cs":"mumbai",             "sl":"mumbai",             "jd":"Mumbai"},
-    {"city":"Delhi",              "state":"Delhi",          "cs":"delhi",              "sl":"delhi",              "jd":"Delhi"},
-    {"city":"Bangalore",          "state":"Karnataka",      "cs":"bangalore",          "sl":"bangalore",          "jd":"Bangalore"},
-    {"city":"Hyderabad",          "state":"Telangana",      "cs":"hyderabad",          "sl":"hyderabad",          "jd":"Hyderabad"},
-    {"city":"Chennai",            "state":"Tamil Nadu",     "cs":"chennai",            "sl":"chennai",            "jd":"Chennai"},
-    {"city":"Kolkata",            "state":"West Bengal",    "cs":"kolkata",            "sl":"kolkata",            "jd":"Kolkata"},
-    {"city":"Pune",               "state":"Maharashtra",    "cs":"pune",               "sl":"pune",               "jd":"Pune"},
-    {"city":"Ahmedabad",          "state":"Gujarat",        "cs":"ahmedabad",          "sl":"ahmedabad",          "jd":"Ahmedabad"},
-    {"city":"Jaipur",             "state":"Rajasthan",      "cs":"jaipur",             "sl":"jaipur",             "jd":"Jaipur"},
-    {"city":"Lucknow",            "state":"Uttar Pradesh",  "cs":"lucknow",            "sl":"lucknow",            "jd":"Lucknow"},
-    {"city":"Surat",              "state":"Gujarat",        "cs":"surat",              "sl":"surat",              "jd":"Surat"},
-    {"city":"Kanpur",             "state":"Uttar Pradesh",  "cs":"kanpur",             "sl":"kanpur",             "jd":"Kanpur"},
-    {"city":"Nagpur",             "state":"Maharashtra",    "cs":"nagpur",             "sl":"nagpur",             "jd":"Nagpur"},
-    {"city":"Indore",             "state":"Madhya Pradesh", "cs":"indore",             "sl":"indore",             "jd":"Indore"},
-    {"city":"Bhopal",             "state":"Madhya Pradesh", "cs":"bhopal",             "sl":"bhopal",             "jd":"Bhopal"},
-    {"city":"Patna",              "state":"Bihar",          "cs":"patna",              "sl":"patna",              "jd":"Patna"},
-    {"city":"Vadodara",           "state":"Gujarat",        "cs":"vadodara",           "sl":"vadodara",           "jd":"Vadodara"},
-    {"city":"Ludhiana",           "state":"Punjab",         "cs":"ludhiana",           "sl":"ludhiana",           "jd":"Ludhiana"},
-    {"city":"Agra",               "state":"Uttar Pradesh",  "cs":"agra",               "sl":"agra",               "jd":"Agra"},
-    {"city":"Nashik",             "state":"Maharashtra",    "cs":"nashik",             "sl":"nashik",             "jd":"Nashik"},
-    {"city":"Faridabad",          "state":"Haryana",        "cs":"faridabad",          "sl":"faridabad",          "jd":"Faridabad"},
-    {"city":"Meerut",             "state":"Uttar Pradesh",  "cs":"meerut",             "sl":"meerut",             "jd":"Meerut"},
-    {"city":"Rajkot",             "state":"Gujarat",        "cs":"rajkot",             "sl":"rajkot",             "jd":"Rajkot"},
-    {"city":"Varanasi",           "state":"Uttar Pradesh",  "cs":"varanasi",           "sl":"varanasi",           "jd":"Varanasi"},
-    {"city":"Amritsar",           "state":"Punjab",         "cs":"amritsar",           "sl":"amritsar",           "jd":"Amritsar"},
-    {"city":"Allahabad",          "state":"Uttar Pradesh",  "cs":"prayagraj",          "sl":"allahabad",          "jd":"Allahabad"},
-    {"city":"Ranchi",             "state":"Jharkhand",      "cs":"ranchi",             "sl":"ranchi",             "jd":"Ranchi"},
-    {"city":"Coimbatore",         "state":"Tamil Nadu",     "cs":"coimbatore",         "sl":"coimbatore",         "jd":"Coimbatore"},
-    {"city":"Gwalior",            "state":"Madhya Pradesh", "cs":"gwalior",            "sl":"gwalior",            "jd":"Gwalior"},
-    {"city":"Vijayawada",         "state":"Andhra Pradesh", "cs":"vijayawada",         "sl":"vijayawada",         "jd":"Vijayawada"},
-    {"city":"Jodhpur",            "state":"Rajasthan",      "cs":"jodhpur",            "sl":"jodhpur",            "jd":"Jodhpur"},
-    {"city":"Raipur",             "state":"Chhattisgarh",   "cs":"raipur",             "sl":"raipur",             "jd":"Raipur"},
-    {"city":"Chandigarh",         "state":"Chandigarh",     "cs":"chandigarh",         "sl":"chandigarh",         "jd":"Chandigarh"},
-    {"city":"Mysore",             "state":"Karnataka",      "cs":"mysore",             "sl":"mysore",             "jd":"Mysore"},
-    {"city":"Bhubaneswar",        "state":"Odisha",         "cs":"bhubaneswar",        "sl":"bhubaneswar",        "jd":"Bhubaneswar"},
-    {"city":"Guwahati",           "state":"Assam",          "cs":"guwahati",           "sl":"guwahati",           "jd":"Guwahati"},
-    {"city":"Kochi",              "state":"Kerala",         "cs":"kochi",              "sl":"kochi",              "jd":"Kochi"},
-    {"city":"Thiruvananthapuram", "state":"Kerala",         "cs":"thiruvananthapuram", "sl":"thiruvananthapuram", "jd":"Thiruvananthapuram"},
-    {"city":"Visakhapatnam",      "state":"Andhra Pradesh", "cs":"visakhapatnam",      "sl":"visakhapatnam",      "jd":"Visakhapatnam"},
-    {"city":"Jalandhar",          "state":"Punjab",         "cs":"jalandhar",          "sl":"jalandhar",          "jd":"Jalandhar"},
-    {"city":"Madurai",            "state":"Tamil Nadu",     "cs":"madurai",            "sl":"madurai",            "jd":"Madurai"},
-    {"city":"Srinagar",           "state":"J&K",            "cs":"srinagar",           "sl":"srinagar",           "jd":"Srinagar"},
-    {"city":"Aurangabad",         "state":"Maharashtra",    "cs":"aurangabad",         "sl":"aurangabad",         "jd":"Aurangabad"},
-    {"city":"Dehradun",           "state":"Uttarakhand",    "cs":"dehradun",           "sl":"dehradun",           "jd":"Dehradun"},
-    {"city":"Jabalpur",           "state":"Madhya Pradesh", "cs":"jabalpur",           "sl":"jabalpur",           "jd":"Jabalpur"},
-    {"city":"Warangal",           "state":"Telangana",      "cs":"warangal",           "sl":"warangal",           "jd":"Warangal"},
-    {"city":"Hubli",              "state":"Karnataka",      "cs":"hubli",              "sl":"hubli",              "jd":"Hubli-Dharwad"},
-    {"city":"Tiruchirappalli",    "state":"Tamil Nadu",     "cs":"tiruchirappalli",    "sl":"tiruchirappalli",    "jd":"Tiruchirappalli"},
-    {"city":"Bareilly",           "state":"Uttar Pradesh",  "cs":"bareilly",           "sl":"bareilly",           "jd":"Bareilly"},
-    {"city":"Moradabad",          "state":"Uttar Pradesh",  "cs":"moradabad",          "sl":"moradabad",          "jd":"Moradabad"},
-    {"city":"Salem",              "state":"Tamil Nadu",     "cs":"salem",              "sl":"salem",              "jd":"Salem"},
+    {"city":"Mumbai",             "state":"Maharashtra",    "cs":"mumbai",             "sl":"mumbai"},
+    {"city":"Delhi",              "state":"Delhi",          "cs":"delhi",              "sl":"delhi"},
+    {"city":"Bangalore",          "state":"Karnataka",      "cs":"bangalore",          "sl":"bangalore"},
+    {"city":"Hyderabad",          "state":"Telangana",      "cs":"hyderabad",          "sl":"hyderabad"},
+    {"city":"Chennai",            "state":"Tamil Nadu",     "cs":"chennai",            "sl":"chennai"},
+    {"city":"Kolkata",            "state":"West Bengal",    "cs":"kolkata",            "sl":"kolkata"},
+    {"city":"Pune",               "state":"Maharashtra",    "cs":"pune",               "sl":"pune"},
+    {"city":"Ahmedabad",          "state":"Gujarat",        "cs":"ahmedabad",          "sl":"ahmedabad"},
+    {"city":"Jaipur",             "state":"Rajasthan",      "cs":"jaipur",             "sl":"jaipur"},
+    {"city":"Lucknow",            "state":"Uttar Pradesh",  "cs":"lucknow",            "sl":"lucknow"},
+    {"city":"Surat",              "state":"Gujarat",        "cs":"surat",              "sl":"surat"},
+    {"city":"Kanpur",             "state":"Uttar Pradesh",  "cs":"kanpur",             "sl":"kanpur"},
+    {"city":"Nagpur",             "state":"Maharashtra",    "cs":"nagpur",             "sl":"nagpur"},
+    {"city":"Indore",             "state":"Madhya Pradesh", "cs":"indore",             "sl":"indore"},
+    {"city":"Bhopal",             "state":"Madhya Pradesh", "cs":"bhopal",             "sl":"bhopal"},
+    {"city":"Patna",              "state":"Bihar",          "cs":"patna",              "sl":"patna"},
+    {"city":"Vadodara",           "state":"Gujarat",        "cs":"vadodara",           "sl":"vadodara"},
+    {"city":"Ludhiana",           "state":"Punjab",         "cs":"ludhiana",           "sl":"ludhiana"},
+    {"city":"Agra",               "state":"Uttar Pradesh",  "cs":"agra",               "sl":"agra"},
+    {"city":"Nashik",             "state":"Maharashtra",    "cs":"nashik",             "sl":"nashik"},
+    {"city":"Faridabad",          "state":"Haryana",        "cs":"faridabad",          "sl":"faridabad"},
+    {"city":"Meerut",             "state":"Uttar Pradesh",  "cs":"meerut",             "sl":"meerut"},
+    {"city":"Rajkot",             "state":"Gujarat",        "cs":"rajkot",             "sl":"rajkot"},
+    {"city":"Varanasi",           "state":"Uttar Pradesh",  "cs":"varanasi",           "sl":"varanasi"},
+    {"city":"Amritsar",           "state":"Punjab",         "cs":"amritsar",           "sl":"amritsar"},
+    {"city":"Allahabad",          "state":"Uttar Pradesh",  "cs":"prayagraj",          "sl":"allahabad"},
+    {"city":"Ranchi",             "state":"Jharkhand",      "cs":"ranchi",             "sl":"ranchi"},
+    {"city":"Coimbatore",         "state":"Tamil Nadu",     "cs":"coimbatore",         "sl":"coimbatore"},
+    {"city":"Gwalior",            "state":"Madhya Pradesh", "cs":"gwalior",            "sl":"gwalior"},
+    {"city":"Vijayawada",         "state":"Andhra Pradesh", "cs":"vijayawada",         "sl":"vijayawada"},
+    {"city":"Jodhpur",            "state":"Rajasthan",      "cs":"jodhpur",            "sl":"jodhpur"},
+    {"city":"Raipur",             "state":"Chhattisgarh",   "cs":"raipur",             "sl":"raipur"},
+    {"city":"Chandigarh",         "state":"Chandigarh",     "cs":"chandigarh",         "sl":"chandigarh"},
+    {"city":"Mysore",             "state":"Karnataka",      "cs":"mysore",             "sl":"mysore"},
+    {"city":"Bhubaneswar",        "state":"Odisha",         "cs":"bhubaneswar",        "sl":"bhubaneswar"},
+    {"city":"Guwahati",           "state":"Assam",          "cs":"guwahati",           "sl":"guwahati"},
+    {"city":"Kochi",              "state":"Kerala",         "cs":"kochi",              "sl":"kochi"},
+    {"city":"Thiruvananthapuram", "state":"Kerala",         "cs":"thiruvananthapuram", "sl":"thiruvananthapuram"},
+    {"city":"Visakhapatnam",      "state":"Andhra Pradesh", "cs":"visakhapatnam",      "sl":"visakhapatnam"},
+    {"city":"Jalandhar",          "state":"Punjab",         "cs":"jalandhar",          "sl":"jalandhar"},
+    {"city":"Madurai",            "state":"Tamil Nadu",     "cs":"madurai",            "sl":"madurai"},
+    {"city":"Srinagar",           "state":"J&K",            "cs":"srinagar",           "sl":"srinagar"},
+    {"city":"Aurangabad",         "state":"Maharashtra",    "cs":"aurangabad",         "sl":"aurangabad"},
+    {"city":"Dehradun",           "state":"Uttarakhand",    "cs":"dehradun",           "sl":"dehradun"},
+    {"city":"Jabalpur",           "state":"Madhya Pradesh", "cs":"jabalpur",           "sl":"jabalpur"},
+    {"city":"Warangal",           "state":"Telangana",      "cs":"warangal",           "sl":"warangal"},
+    {"city":"Hubli",              "state":"Karnataka",      "cs":"hubli",              "sl":"hubli"},
+    {"city":"Tiruchirappalli",    "state":"Tamil Nadu",     "cs":"tiruchirappalli",    "sl":"tiruchirappalli"},
+    {"city":"Bareilly",           "state":"Uttar Pradesh",  "cs":"bareilly",           "sl":"bareilly"},
+    {"city":"Moradabad",          "state":"Uttar Pradesh",  "cs":"moradabad",          "sl":"moradabad"},
+    {"city":"Salem",              "state":"Tamil Nadu",     "cs":"salem",              "sl":"salem"},
 ]
 
-# Practo hata diya — virtual landline numbers deta tha
-SOURCES = ["justdial", "sulekha", "clinicspots"]
+SOURCES = ["googlemaps", "sulekha", "clinicspots"]
 
 # ─── STATE ──────────────────────────────────────────────────
 STATE_FILE = "state.json"
@@ -127,32 +123,18 @@ def make_key(name, phone, address):
 def now_ist():
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %H:%M")
 
-# ─── MOBILE NUMBER FILTER ───────────────────────────────────
-MOBILE_RE = re.compile(
-    r"(?<!\d)"
-    r"(?:\+91[\s\-]?)?"        # optional +91
-    r"([6-9]\d{9})"            # 10 digit — 6/7/8/9 se shuru (real Indian mobile)
-    r"(?!\d)"
-)
+MOBILE_RE = re.compile(r"(?<!\d)(?:\+91[\s\-]?)?([6-9]\d{9})(?!\d)")
+PHONE_RE  = re.compile(r"(?<!\d)(\+?91[\s\-]?\d{10}|\d{10}|\d{3,5}[\s\-]\d{6,8})(?!\d)")
 
-def extract_mobile(text):
-    """
-    Sirf real Indian mobile numbers nikalo.
-    Landline (011-xxx, 022-xxx, +9111xxx) automatically reject ho jaayenge.
-    """
-    # +91 ke baad wala number nikalo
-    text_clean = re.sub(r"\s+", "", text)  # spaces hata do
-    m = MOBILE_RE.search(text_clean)
-    return m.group(1) if m else ""
+def extract_phone(text):
+    """Mobile pehle try karo, nahi mila toh any phone."""
+    t = re.sub(r"\s+", "", text)
+    m = MOBILE_RE.search(t)
+    if m:
+        return m.group(1)
+    m = PHONE_RE.search(t)
+    return m.group(0) if m else ""
 
-def is_mobile(phone):
-    """Check karo — real mobile hai ya landline."""
-    digits = re.sub(r"\D", "", phone)
-    if digits.startswith("91") and len(digits) == 12:
-        digits = digits[2:]
-    return len(digits) == 10 and digits[0] in "6789"
-
-# ─── SESSION ────────────────────────────────────────────────
 def new_session(referer):
     s = requests.Session()
     s.headers.update({
@@ -180,40 +162,36 @@ def get_html_req(session, url, timeout=25, retries=3):
                 time.sleep(wait)
         except requests.exceptions.Timeout:
             wait = (attempt+1)*4
-            log.warning(f"  Timeout ({attempt+1}/{retries}) — wait {wait}s")
             if attempt < retries-1:
                 time.sleep(wait)
             else:
                 return None
         except Exception as e:
-            log.warning(f"  Err: {e} — retry {attempt+1}")
+            log.warning(f"  Err: {e}")
             time.sleep(3)
     return None
 
 def parse_jsonld(soup, city, url, src):
     rows = []
-    skip = {"WebPage","WebSite","BreadcrumbList","Organization","ItemList","SiteNavigationElement"}
+    skip = {"WebPage","WebSite","BreadcrumbList","Organization","ItemList"}
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
-            obj = json.loads(tag.string or "")
-            items = obj.get("@graph", [obj] if isinstance(obj, dict) else obj)
+            obj   = json.loads(tag.string or "")
+            items = obj.get("@graph",[obj] if isinstance(obj,dict) else obj)
             if isinstance(items, dict):
                 items = [items]
             for item in items:
                 name = item.get("name","").strip()
                 if not name or len(name) < 4 or item.get("@type","") in skip:
                     continue
-                addr    = item.get("address", {})
-                raw_ph  = str(item.get("telephone",""))
-                phone   = extract_mobile(raw_ph) or (raw_ph if is_mobile(raw_ph) else "")
-                address = (addr.get("streetAddress","") + " " + addr.get("addressLocality","")).strip() or city["city"]
-                rows.append([
-                    name, "Dental Clinic", phone, "", item.get("url",""),
-                    address, city["city"], city["state"],
+                addr  = item.get("address",{})
+                phone = extract_phone(str(item.get("telephone","")))
+                addr_str = (addr.get("streetAddress","")+" "+addr.get("addressLocality","")).strip() or city["city"]
+                rows.append([name,"Dental Clinic",phone,"",item.get("url",""),
+                    addr_str,city["city"],city["state"],
                     item.get("aggregateRating",{}).get("ratingValue",""),
                     item.get("aggregateRating",{}).get("reviewCount",""),
-                    url, now_ist(), src
-                ])
+                    url,now_ist(),src])
         except Exception:
             pass
     return rows
@@ -238,7 +216,7 @@ def get_pw_ctx():
         _pw_ctx = _pw_browser.new_context(
             user_agent=random.choice(USER_AGENTS),
             locale="en-IN",
-            viewport={"width": 1280, "height": 800},
+            viewport={"width":1280,"height":800},
         )
         _pw_ctx.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
@@ -255,106 +233,165 @@ def close_pw():
             pass
         _pw_inst = _pw_browser = _pw_ctx = None
 
-def pw_get_html(url, wait_sel=None, scroll=False, timeout=40000, retries=2):
+
+# ============================================================
+#  SOURCE 1 — Google Maps (NO API KEY)
+#  Playwright se real phone numbers milte hain
+# ============================================================
+def scrape_googlemaps(city, page=1):
+    """
+    Google Maps search → results scroll karo → har listing click karo → phone nikalo.
+    Page = scroll count (har scroll ~20 results load karta hai)
+    """
+    query   = f"dental+clinic+{city['city']}+India"
+    map_url = f"https://www.google.com/maps/search/{query}"
+    rows    = []
+
     ctx = get_pw_ctx()
-    for attempt in range(retries):
-        pg = ctx.new_page()
+    pg  = ctx.new_page()
+
+    try:
+        pg.goto(map_url, timeout=40000, wait_until="domcontentloaded")
+
+        # Cookie consent dismiss karo agar aaye
         try:
-            pg.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            pg.click("button[aria-label*='Accept'], button[jsname='b3VHJd']", timeout=4000)
+        except Exception:
+            pass
+
+        # Results panel load hone do
+        try:
+            pg.wait_for_selector("div[role='feed'], div.Nv2PK", timeout=15000)
+        except PWTimeout:
+            log.warning(f"  GMaps {city['city']}: results load nahi hue")
+            return [], False
+
+        # Page ke hisaab se scroll karo — zyada results load karo
+        feed_sel = "div[role='feed']"
+        for _ in range(page * 3):
             try:
-                pg.wait_for_load_state("networkidle", timeout=8000)
-            except PWTimeout:
-                pass
-            if wait_sel:
-                try:
-                    pg.wait_for_selector(wait_sel, timeout=12000)
-                except PWTimeout:
-                    if attempt < retries - 1:
-                        pg.close()
-                        time.sleep(2)
-                        continue
-            if scroll:
-                for _ in range(4):
-                    pg.evaluate("window.scrollBy(0, window.innerHeight)")
-                    pg.wait_for_timeout(800)
-            return pg.content()
-        except Exception as e:
-            log.warning(f"  PW error (attempt {attempt+1}): {e}")
-            if attempt < retries - 1:
-                time.sleep(3)
-        finally:
-            pg.close()
-    return None
+                pg.eval_on_selector(feed_sel,
+                    "el => el.scrollBy(0, el.scrollHeight)")
+                pg.wait_for_timeout(1500)
+            except Exception:
+                break
 
+        # Saari listing cards collect karo
+        cards = pg.query_selector_all("div.Nv2PK, div[jsaction*='mouseover:pane']")
+        log.info(f"  GMaps {city['city']}: {len(cards)} cards mili")
 
-# ============================================================
-#  SOURCE 1 — JustDial (Playwright)
-#  Real mobile numbers milte hain yahan
-# ============================================================
-def scrape_justdial(city, page=1):
-    page_slug = f"/page-{page}" if page > 1 else ""
-    url = f"https://www.justdial.com/{city['jd']}/Dentists/nct-10156331{page_slug}"
+        processed = 0
+        for card in cards:
+            if processed >= 20:   # ek page pe max 20
+                break
+            try:
+                card.click()
+                pg.wait_for_timeout(2000)
 
-    html = pw_get_html(
-        url,
-        wait_sel="span.lng_cont_name, div.resultbox_info, li.cntanr",
-        scroll=True,
-        timeout=45000
-    )
-    if not html:
-        return [], False
+                # Detail panel mein phone dhundho
+                # Google Maps phone aria-label mein hota hai
+                phone = ""
 
-    soup  = BeautifulSoup(html, "html.parser")
-    rows  = []
+                # Method 1: aria-label se
+                phone_btn = pg.query_selector(
+                    "button[data-tooltip='Copy phone number'], "
+                    "button[aria-label*='phone'], "
+                    "a[href^='tel:']"
+                )
+                if phone_btn:
+                    label = phone_btn.get_attribute("aria-label") or \
+                            phone_btn.get_attribute("data-value") or ""
+                    href  = phone_btn.get_attribute("href") or ""
+                    phone = extract_phone(label + " " + href)
 
-    cards = (
-        soup.find_all("div", class_=re.compile(r"resultbox_info", re.I)) or
-        soup.find_all("li",  class_=re.compile(r"cntanr", re.I)) or
-        soup.find_all("div", class_=re.compile(r"jdcard|resultcard", re.I))
-    )
+                # Method 2: tel: link se
+                if not phone:
+                    tel = pg.query_selector("a[href^='tel:']")
+                    if tel:
+                        href  = tel.get_attribute("href") or ""
+                        phone = extract_phone(href.replace("tel:",""))
 
-    for card in cards:
-        # Name
-        nt = (card.find(class_=re.compile(r"resultbox_title|fn|comp-name|lng_cont_name", re.I))
-              or card.find(["h2","h3","h4","a"]))
-        if not nt:
-            continue
-        name = nt.get_text(strip=True)
-        if not name or len(name) < 4:
-            continue
+                # Method 3: visible text se
+                if not phone:
+                    detail_html = pg.inner_html(
+                        "div[role='main'], div.m6QErb[data-value]",
+                    ) if pg.query_selector("div[role='main']") else ""
+                    if detail_html:
+                        phone = extract_phone(
+                            BeautifulSoup(detail_html,"html.parser").get_text()
+                        )
 
-        # Phone — mobile extract karo
-        card_text = card.get_text(separator=" ")
-        phone = extract_mobile(card_text)
+                # Name
+                name = ""
+                name_el = pg.query_selector("h1.DUwDvf, h1[class*='fontHeadline']")
+                if name_el:
+                    name = name_el.inner_text().strip()
 
-        # Address
-        at = card.find(class_=re.compile(r"resultbox_address|address|adr|locality", re.I))
+                if not name or len(name) < 4:
+                    processed += 1
+                    continue
 
-        # Rating
-        rt = card.find(class_=re.compile(r"green-box|rating|star|score", re.I))
+                # Address
+                address = city["city"]
+                addr_el = pg.query_selector(
+                    "button[data-tooltip='Copy address'] div.rogA2c, "
+                    "div[data-section-id='ad'] span"
+                )
+                if addr_el:
+                    address = addr_el.inner_text().strip() or city["city"]
 
-        rows.append([
-            name, "Dental Clinic",
-            phone, "", "",
-            at.get_text(strip=True) if at else city["city"],
-            city["city"], city["state"],
-            rt.get_text(strip=True) if rt else "", "",
-            url, now_ist(), "JustDial"
-        ])
+                # Website
+                website = ""
+                web_el  = pg.query_selector("a[data-tooltip='Open website'], a[aria-label*='website']")
+                if web_el:
+                    website = web_el.get_attribute("href") or ""
 
-    has_more = (page < MAX_PAGES and
-                bool(soup.find("a", attrs={"title": re.compile(r"next", re.I)}) or
-                     soup.find("a", href=re.compile(rf"page-{page+1}"))))
+                # Rating
+                rating = ""
+                rat_el = pg.query_selector("div.F7nice span[aria-hidden='true']")
+                if rat_el:
+                    rating = rat_el.inner_text().strip()
 
-    # Mobile wale count karo
-    mobile_count = sum(1 for r in rows if r[2])
-    log.info(f"  JustDial {city['city']} p{page}: {len(rows)} total | {mobile_count} mobile numbers")
+                # Reviews count
+                reviews = ""
+                rev_el  = pg.query_selector("div.F7nice span[aria-label*='review']")
+                if rev_el:
+                    rev_text = rev_el.get_attribute("aria-label") or ""
+                    rm = re.search(r"[\d,]+", rev_text)
+                    if rm:
+                        reviews = rm.group(0)
+
+                rows.append([
+                    name, "Dental Clinic",
+                    phone, "", website,
+                    address, city["city"], city["state"],
+                    rating, reviews,
+                    map_url, now_ist(), "Google Maps"
+                ])
+
+                processed += 1
+                log.info(f"    ✓ {name} | {phone or 'no phone'}")
+                time.sleep(random.uniform(1.0, 2.0))
+
+            except Exception as e:
+                log.warning(f"    Card error: {e}")
+                processed += 1
+                continue
+
+    except Exception as e:
+        log.error(f"  GMaps {city['city']} error: {e}")
+    finally:
+        pg.close()
+
+    # has_more: agar 20 results mile toh aur ho sakte hain
+    has_more = len(rows) >= 18 and page < MAX_PAGES
+    phone_count = sum(1 for r in rows if r[2])
+    log.info(f"  GMaps {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
     return rows, has_more
 
 
 # ============================================================
 #  SOURCE 2 — Sulekha (requests)
-#  Mobile numbers milte hain mostly
 # ============================================================
 def scrape_sulekha(city, page=1):
     base = "https://www.sulekha.com"
@@ -363,10 +400,8 @@ def scrape_sulekha(city, page=1):
     html = get_html_req(sess, url)
     if not html:
         return [], False
-
     soup = BeautifulSoup(html, "html.parser")
     rows = parse_jsonld(soup, city, url, "Sulekha")
-
     if not rows:
         for card in soup.find_all("div", class_=re.compile(r"(serv|listing|provider|biz|card)", re.I)):
             nt = (card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|biz|heading)", re.I))
@@ -376,20 +411,16 @@ def scrape_sulekha(city, page=1):
             name = nt.get_text(strip=True)
             if not name or len(name) < 4:
                 continue
-            phone = extract_mobile(card.get_text(separator=" "))
+            phone = extract_phone(card.get_text(separator=" "))
             at    = card.find(class_=re.compile(r"addr|address|location|area|locality", re.I))
             rt    = card.find(class_=re.compile(r"rating|star|score", re.I))
-            rows.append([
-                name, "Dental Clinic",
-                phone, "", "",
+            rows.append([name,"Dental Clinic",phone,"","",
                 at.get_text(strip=True) if at else city["city"],
-                city["city"], city["state"],
-                rt.get_text(strip=True) if rt else "", "",
-                url, now_ist(), "Sulekha"
-            ])
-
-    mobile_count = sum(1 for r in rows if r[2])
-    log.info(f"  Sulekha {city['city']} p{page}: {len(rows)} total | {mobile_count} mobile numbers")
+                city["city"],city["state"],
+                rt.get_text(strip=True) if rt else "","",
+                url,now_ist(),"Sulekha"])
+    phone_count = sum(1 for r in rows if r[2])
+    log.info(f"  Sulekha {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
     return rows, check_has_more(soup, page)
 
 
@@ -403,10 +434,8 @@ def scrape_clinicspots(city, page=1):
     html = get_html_req(sess, url)
     if not html:
         return [], False
-
     soup = BeautifulSoup(html, "html.parser")
     rows = parse_jsonld(soup, city, url, "Clinicspots")
-
     if not rows:
         for card in soup.find_all("div", class_=re.compile(r"(clinic|doctor|card|listing)", re.I)):
             nt = card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|clinic)", re.I))
@@ -415,20 +444,16 @@ def scrape_clinicspots(city, page=1):
             name = nt.get_text(strip=True)
             if not name or len(name) < 4:
                 continue
-            phone = extract_mobile(card.get_text(separator=" "))
+            phone = extract_phone(card.get_text(separator=" "))
             at    = card.find(class_=re.compile(r"addr|address|location|area", re.I))
             rt    = card.find(class_=re.compile(r"rating|star|score", re.I))
-            rows.append([
-                name, "Dental Clinic",
-                phone, "", "",
+            rows.append([name,"Dental Clinic",phone,"","",
                 at.get_text(strip=True) if at else city["city"],
-                city["city"], city["state"],
-                rt.get_text(strip=True) if rt else "", "",
-                url, now_ist(), "Clinicspots"
-            ])
-
-    mobile_count = sum(1 for r in rows if r[2])
-    log.info(f"  Clinicspots {city['city']} p{page}: {len(rows)} total | {mobile_count} mobile numbers")
+                city["city"],city["state"],
+                rt.get_text(strip=True) if rt else "","",
+                url,now_ist(),"Clinicspots"])
+    phone_count = sum(1 for r in rows if r[2])
+    log.info(f"  Clinicspots {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
     return rows, check_has_more(soup, page)
 
 
@@ -439,7 +464,7 @@ def get_sheet():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     sheet_id   = os.environ.get("SHEET_ID")
     if not creds_json or not sheet_id:
-        raise ValueError("GOOGLE_CREDENTIALS ya SHEET_ID nahi mili!")
+        raise ValueError("Env variables missing!")
     creds  = Credentials.from_service_account_info(
         json.loads(creds_json),
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
@@ -452,8 +477,8 @@ def get_sheet():
         ws = sheet.add_worksheet(SHEET_NAME, rows=50000, cols=13)
         ws.append_row(HEADERS_ROW)
         ws.format("A1:M1", {
-            "textFormat"     : {"bold": True, "foregroundColor": {"red":1,"green":1,"blue":1}},
-            "backgroundColor": {"red":0.1, "green":0.45, "blue":0.9}
+            "textFormat"     : {"bold":True,"foregroundColor":{"red":1,"green":1,"blue":1}},
+            "backgroundColor": {"red":0.1,"green":0.45,"blue":0.9}
         })
     return ws
 
@@ -475,7 +500,7 @@ def append_rows_to_sheet(ws, rows):
 #  MAIN
 # ============================================================
 def main():
-    log.info("=== Dental Scraper v10 Start ===")
+    log.info("=== Dental Scraper v11 Start ===")
     ws       = get_sheet()
     existing = get_existing_keys(ws)
     log.info(f"Sheet mein already {len(existing)} records hain")
@@ -501,8 +526,8 @@ def main():
             log.info(f"[{collected}/{DAILY_LIMIT}] {source} | {city['city']} | page {page}")
 
             try:
-                if source == "justdial":
-                    rows, has_more = scrape_justdial(city, page)
+                if source == "googlemaps":
+                    rows, has_more = scrape_googlemaps(city, page)
                 elif source == "sulekha":
                     rows, has_more = scrape_sulekha(city, page)
                 else:
@@ -530,11 +555,11 @@ def main():
 
             if has_more and collected < DAILY_LIMIT:
                 page += 1
-                time.sleep(random.uniform(2.0, 4.0))
+                time.sleep(random.uniform(3.0, 5.0))
             else:
                 page      = 1
                 city_idx += 1
-                time.sleep(random.uniform(3.0, 5.0))
+                time.sleep(random.uniform(4.0, 7.0))  # Maps pe thoda zyada wait
 
     finally:
         close_pw()
