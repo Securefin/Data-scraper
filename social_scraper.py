@@ -408,8 +408,8 @@ def scrape_fb_page(page_url, city):
 def scrape_facebook_city(city, limit=10):
     query = f"dental clinic {city['city']} India site:facebook.com"
     log.info(f"  FB search: {query}")
-    urls  = search_urls(query, max_results=12)
-    rows  = []
+    urls = search_urls(query, max_results=12)
+    rows = []
 
     for url in urls:
         if "facebook.com" not in url:
