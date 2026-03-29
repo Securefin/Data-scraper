@@ -102,8 +102,22 @@ SOURCES = ["googlemaps", "sulekha", "clinicspots"]
 def make_key(name, phone, address):
     return hashlib.md5(f"{name}|{phone}|{address}".lower().strip().encode()).hexdigest()
 
+THIRD_PARTY_DOMAINS = [
+    "practo.com", "justdial.com", "sulekha.com",
+    "clinicspots.com", "lybrate.com", "credihealth.com",
+    "docprime.com", "medibuddy.in", "bajajfinservhealth.in",
+    "apollo247.com", "healthifyme.com", "mfine.co"
+]
+
+def is_third_party(url):
+    """Practo/Justdial jaisi third party URLs detect karo."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    return any(domain in url_lower for domain in THIRD_PARTY_DOMAINS)
+
 def make_website_key(website):
-    if not website:
+    if not website or is_third_party(website):
         return ""
     m = re.search(r"https?://(?:www\.)?([^/]+)", website.lower())
     return m.group(1) if m else website.lower().strip()
@@ -174,7 +188,10 @@ def parse_jsonld(soup, city, url, src):
                 addr  = item.get("address",{})
                 phone = extract_phone(str(item.get("telephone","")))
                 addr_str = (addr.get("streetAddress","")+" "+addr.get("addressLocality","")).strip() or city["city"]
-                rows.append([name,"Dental Clinic",phone,"",item.get("url",""),
+                website = item.get("url","")
+                if is_third_party(website):
+                    website = ""
+                rows.append([name,"Dental Clinic",phone,"",website,
                     addr_str,city["city"],city["state"],
                     item.get("aggregateRating",{}).get("ratingValue",""),
                     item.get("aggregateRating",{}).get("reviewCount",""),
@@ -322,6 +339,8 @@ def scrape_googlemaps(city, page=1):
                             ).get("q", [""])[0]
                         elif href.startswith("http") and "google.com" not in href:
                             website = href
+                if is_third_party(website):
+                    website = ""
                 except Exception:
                     website = ""
 
