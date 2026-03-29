@@ -2,13 +2,15 @@
 India Dental Clinic Scraper v13
 """
 
-import os, re, time, random, json, logging, hashlib, urllib.parse
+import os, re, time, random, json, logging, hashlib, urllib.parse, asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from crawl4ai import AsyncWebCrawler
+from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -449,7 +451,7 @@ def scrape_googlemaps(city, page=1):
             except Exception:
                 pass
 
-    has_more = len(rows) >= 6 and page < MAX_PAGES
+    has_more = False  # GMaps pe pagination nahi hoti — same URLs repeat hoti hain
     phone_count = sum(1 for r in rows if r[2])
     log.info(f"  GMaps {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
     return rows, has_more
