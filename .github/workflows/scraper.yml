@@ -23,12 +23,14 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright + Chromium
         run: |
-          pip install -r requirements.txt
           pip install --upgrade playwright
-          playwright install chromium
-          sudo playwright install-deps chromium
+          python -m playwright install chromium
+          sudo $(which python) -m playwright install-deps chromium
 
       - name: Run scraper
         env:
