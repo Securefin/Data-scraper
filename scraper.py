@@ -447,6 +447,7 @@ def scrape_googlemaps(city, page=1):
         processed = 0
         for url in place_urls:
             if processed >= 8:  # 20 → 8
+                break
             except Exception as e:
                 log.warning(f"    URL error: {e}")
                 processed += 1
