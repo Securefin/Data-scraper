@@ -1,13 +1,20 @@
 """
-India Dental Clinic Scraper v12
+India Dental Clinic Scraper v13
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Changes from v11:
-  - Time-based limit (RUN_MINUTES) — records ki jagah time dekha
-  - State Google Sheets mein save hoti hai (7-day cache problem fix)
-  - DAILY_LIMIT hata diya — ab time se control hoga
+Fixes from v12:
+  1. SyntaxError line ~361 — try/except indentation fix
+  2. Playwright page leak on crash — pg defined before try
+  3. urllib.parse — top-level import
+  4. get_all_values() memory — column-only fetch
+  5. check_has_more() — multiple param fallbacks
+  6. Google Maps rate limiting — sleep badha
+  7. State lost if batch fails — try/except separated
+  8. Silent JSON-LD failures — warning log added
+  9. Source wrap logic — cleaner cycle detection
+  10. Sheets API quota — retry wrapper added
 """
 
-import os, re, time, random, json, logging, hashlib
+import os, re, time, random, json, logging, hashlib, urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,11 +32,17 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ─────────────────────────────────────────────────
-RUN_MINUTES  = int(os.environ.get("RUN_MINUTES", 10))   # Har run kitne minutes chale
+RUN_MINUTES  = int(os.environ.get("RUN_MINUTES", 10))
 SHEET_NAME   = "Business Data"
-STATE_SHEET  = "Scraper State"                           # State is sheet mein save hogi
+STATE_SHEET  = "Scraper State"
 BATCH_SIZE   = 10
 MAX_PAGES    = 5
+# GitHub Actions job limit ke andar rehne ke liye buffer (seconds)
+# 6-hour limit hai GitHub pe — RUN_MINUTES se control hoga
+TIME_BUFFER  = 45          # graceful stop ke liye extra buffer
+SHEETS_RETRY = 5           # Sheets API retry count
+SHEETS_WAIT  = 12          # retry ke beech wait (seconds) — quota 100req/100s
+
 HEADERS_ROW  = [
     "Name", "Category", "Phone", "Email", "Website",
     "Address", "City", "State", "Rating", "Reviews",
@@ -102,7 +115,6 @@ SOURCES = ["googlemaps", "sulekha", "clinicspots"]
 def make_key(name, phone, address):
     return hashlib.md5(f"{name}|{phone}|{address}".lower().strip().encode()).hexdigest()
 
-# Common words jo URL match mein ignore karne hain
 SKIP_WORDS = {
     "dental", "clinic", "care", "centre", "center", "dr", "doctor",
     "and", "the", "in", "of", "by", "my", "best", "new", "city",
@@ -112,27 +124,16 @@ SKIP_WORDS = {
 }
 
 def is_own_website(business_name, url):
-    """
-    Business name ke meaningful words URL mein hain → apni website hai.
-    Nahi hain → third party hai.
-    """
     if not url:
         return False
-
-    # Domain nikalo
     m = re.search(r"https?://(?:www\.)?([^/]+)", url.lower())
     if not m:
         return False
     domain = m.group(1)
-
-    # Business name ke words nikalo — short/common words skip karo
     words = re.findall(r"[a-z]+", business_name.lower())
     meaningful = [w for w in words if len(w) > 3 and w not in SKIP_WORDS]
-
     if not meaningful:
         return False
-
-    # Koi bhi meaningful word domain mein hai → apni website
     return any(word in domain for word in meaningful)
 
 def make_website_key(website, business_name=""):
@@ -174,7 +175,7 @@ def get_html_req(session, url, timeout=25, retries=3):
             if r.status_code == 200:
                 return r.text
             if r.status_code in (403, 404):
-                log.warning(f"  {r.status_code} — skip")
+                log.warning(f"  {r.status_code} — skip: {url}")
                 return None
             if r.status_code in (429, 503, 504):
                 wait = int(r.headers.get("Retry-After", (attempt+1)*10))
@@ -182,15 +183,17 @@ def get_html_req(session, url, timeout=25, retries=3):
                 time.sleep(wait)
         except requests.exceptions.Timeout:
             wait = (attempt+1)*4
+            log.warning(f"  Timeout attempt {attempt+1} — wait {wait}s")
             if attempt < retries-1:
                 time.sleep(wait)
             else:
                 return None
         except Exception as e:
-            log.warning(f"  Err: {e}")
+            log.warning(f"  Req err: {e}")
             time.sleep(3)
     return None
 
+# FIX #8: Silent JSON-LD failures — warning log added
 def parse_jsonld(soup, city, url, src):
     rows = []
     skip = {"WebPage","WebSite","BreadcrumbList","Organization","ItemList"}
@@ -204,10 +207,10 @@ def parse_jsonld(soup, city, url, src):
                 name = item.get("name","").strip()
                 if not name or len(name) < 4 or item.get("@type","") in skip:
                     continue
-                addr  = item.get("address",{})
-                phone = extract_phone(str(item.get("telephone","")))
+                addr     = item.get("address",{})
+                phone    = extract_phone(str(item.get("telephone","")))
                 addr_str = (addr.get("streetAddress","")+" "+addr.get("addressLocality","")).strip() or city["city"]
-                website = item.get("url","")
+                website  = item.get("url","")
                 if not is_own_website(name, website):
                     website = ""
                 rows.append([name,"Dental Clinic",phone,"",website,
@@ -215,12 +218,23 @@ def parse_jsonld(soup, city, url, src):
                     item.get("aggregateRating",{}).get("ratingValue",""),
                     item.get("aggregateRating",{}).get("reviewCount",""),
                     url,now_ist(),src])
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"  JSON-LD parse warning ({src} {city['city']}): {e}")  # FIX #8
     return rows
 
+# FIX #5: check_has_more — multiple param fallbacks
 def check_has_more(soup, page, param="page"):
-    return page < MAX_PAGES and bool(soup.find("a", href=re.compile(rf"[?&]{param}={page+1}")))
+    if page >= MAX_PAGES:
+        return False
+    # Try multiple common pagination param names
+    for p in [param, "pg", "p", "start"]:
+        if soup.find("a", href=re.compile(rf"[?&]{p}={page+1}")):
+            return True
+    # Next button / link fallback
+    next_btn = soup.find("a", string=re.compile(r"next|›|»", re.I))
+    if next_btn and next_btn.get("href"):
+        return True
+    return False
 
 
 # ─── PLAYWRIGHT ─────────────────────────────────────────────
@@ -266,9 +280,10 @@ def scrape_googlemaps(city, page=1):
     rows    = []
 
     ctx = get_pw_ctx()
-    pg  = ctx.new_page()
+    pg  = None  # FIX #2: NameError se bachne ke liye pehle None
 
     try:
+        pg = ctx.new_page()
         pg.goto(map_url, timeout=25000, wait_until="domcontentloaded")
 
         try:
@@ -299,7 +314,7 @@ def scrape_googlemaps(city, page=1):
                 break
             try:
                 card.click(timeout=5000)
-                pg.wait_for_timeout(1500)   # 2s → 1.5s
+                pg.wait_for_timeout(2000)  # FIX #6: 1.5s → 2s
 
                 phone = ""
                 phone_btn = pg.query_selector(
@@ -342,6 +357,7 @@ def scrape_googlemaps(city, page=1):
                 if addr_el:
                     address = addr_el.inner_text().strip() or city["city"]
 
+                # FIX #1 + #3: urllib.parse top-level import, try/except indentation fix
                 website = ""
                 try:
                     web_el = pg.query_selector(
@@ -352,14 +368,14 @@ def scrape_googlemaps(city, page=1):
                     if web_el:
                         href = web_el.get_attribute("href") or ""
                         if "/url?q=" in href:
-                            import urllib.parse
                             website = urllib.parse.parse_qs(
                                 urllib.parse.urlparse(href).query
                             ).get("q", [""])[0]
                         elif href.startswith("http") and "google.com" not in href:
                             website = href
-                if not is_own_website(name, website):
-                    website = ""
+                    # FIX #1: is_own_website check try ke ANDAR hai ab
+                    if not is_own_website(name, website):
+                        website = ""
                 except Exception:
                     website = ""
 
@@ -386,7 +402,7 @@ def scrape_googlemaps(city, page=1):
 
                 processed += 1
                 log.info(f"    ✓ {name} | {phone or 'no phone'}")
-                time.sleep(random.uniform(0.8, 1.5))   # wait kam kiya
+                time.sleep(random.uniform(2.0, 3.5))  # FIX #6: 0.8-1.5 → 2.0-3.5
 
             except Exception as e:
                 log.warning(f"    Card error: {e}")
@@ -396,7 +412,12 @@ def scrape_googlemaps(city, page=1):
     except Exception as e:
         log.error(f"  GMaps {city['city']} error: {e}")
     finally:
-        pg.close()
+        # FIX #2: pg None check — crash pe NameError nahi aayega
+        if pg is not None:
+            try:
+                pg.close()
+            except Exception:
+                pass
 
     has_more = len(rows) >= 18 and page < MAX_PAGES
     phone_count = sum(1 for r in rows if r[2])
@@ -472,13 +493,37 @@ def scrape_clinicspots(city, page=1):
 
 
 # ============================================================
-#  GOOGLE SHEETS — Data + State dono yahan save hoga
+#  GOOGLE SHEETS — Retry wrapper + Data + State
 # ============================================================
+
+# FIX #10: Sheets API quota — retry wrapper
+def sheets_call_with_retry(fn, *args, **kwargs):
+    """Koi bhi gspread call isko wrap karke karo — quota error pe retry karega."""
+    for attempt in range(SHEETS_RETRY):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, "status_code", None)
+            if status == 429:
+                wait = SHEETS_WAIT * (attempt + 1)
+                log.warning(f"  Sheets quota hit — {wait}s wait (attempt {attempt+1}/{SHEETS_RETRY})")
+                time.sleep(wait)
+            else:
+                log.error(f"  Sheets API error: {e}")
+                raise
+        except Exception as e:
+            log.error(f"  Sheets call error: {e}")
+            if attempt < SHEETS_RETRY - 1:
+                time.sleep(SHEETS_WAIT)
+            else:
+                raise
+    return None
+
 def get_sheet():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     sheet_id   = os.environ.get("SHEET_ID")
     if not creds_json or not sheet_id:
-        raise ValueError("Env variables missing!")
+        raise ValueError("Env variables missing: GOOGLE_CREDENTIALS or SHEET_ID")
     creds  = Credentials.from_service_account_info(
         json.loads(creds_json),
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
@@ -486,33 +531,30 @@ def get_sheet():
     client = gspread.authorize(creds)
     sheet  = client.open_by_key(sheet_id)
 
-    # Data sheet
     try:
         ws = sheet.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
         ws = sheet.add_worksheet(SHEET_NAME, rows=50000, cols=13)
-        ws.append_row(HEADERS_ROW)
-        ws.format("A1:M1", {
+        sheets_call_with_retry(ws.append_row, HEADERS_ROW)
+        sheets_call_with_retry(ws.format, "A1:M1", {
             "textFormat"     : {"bold":True,"foregroundColor":{"red":1,"green":1,"blue":1}},
             "backgroundColor": {"red":0.1,"green":0.45,"blue":0.9}
         })
 
-    # State sheet — ek alag sheet mein state save karenge
     try:
         state_ws = sheet.worksheet(STATE_SHEET)
     except gspread.WorksheetNotFound:
         state_ws = sheet.add_worksheet(STATE_SHEET, rows=10, cols=5)
-        state_ws.append_row(["city_idx", "source_idx", "page", "updated_at"])
-        state_ws.append_row([0, 0, 1, now_ist()])
+        sheets_call_with_retry(state_ws.append_row, ["city_idx", "source_idx", "page", "updated_at"])
+        sheets_call_with_retry(state_ws.append_row, [0, 0, 1, now_ist()])
 
     return ws, state_ws
 
 def load_state_from_sheet(state_ws):
-    """State Google Sheets se load karo."""
     try:
-        rows = state_ws.get_all_values()
-        if len(rows) >= 2:
-            data = rows[1]  # Row 2 = actual data
+        rows = sheets_call_with_retry(state_ws.get_all_values)
+        if rows and len(rows) >= 2:
+            data = rows[1]
             return {
                 "city_idx"  : int(data[0]),
                 "source_idx": int(data[1]),
@@ -523,9 +565,8 @@ def load_state_from_sheet(state_ws):
     return {"city_idx": 0, "source_idx": 0, "page": 1}
 
 def save_state_to_sheet(state_ws, state):
-    """State Google Sheets mein save karo."""
     try:
-        state_ws.update("A2:D2", [[
+        sheets_call_with_retry(state_ws.update, "A2:D2", [[
             state["city_idx"],
             state["source_idx"],
             state["page"],
@@ -533,65 +574,77 @@ def save_state_to_sheet(state_ws, state):
         ]])
         log.info(f"  State saved → city:{state['city_idx']} source:{state['source_idx']} page:{state['page']}")
     except Exception as e:
-        log.error(f"State save error: {e}")
+        log.error(f"State save FAILED: {e}")
 
+# FIX #4: get_all_values() memory — sirf phone+name+address columns fetch karo
 def get_existing_keys(ws):
     keys = set()
-    for row in ws.get_all_values()[1:]:
-        if len(row) >= 6:
-            k = make_key(row[0], row[2] if len(row) > 2 else "", row[5])
-            keys.add(k)
+    try:
+        # Sirf columns A (name), C (phone), F (address) fetch karo — poora sheet nahi
+        names    = sheets_call_with_retry(ws.col_values, 1)   # col A
+        phones   = sheets_call_with_retry(ws.col_values, 3)   # col C
+        addrs    = sheets_call_with_retry(ws.col_values, 6)   # col F
+        max_len  = max(len(names), len(phones), len(addrs))
+        for i in range(1, max_len):  # row 0 = header skip
+            n = names[i]  if i < len(names)  else ""
+            p = phones[i] if i < len(phones) else ""
+            a = addrs[i]  if i < len(addrs)  else ""
+            keys.add(make_key(n, p, a))
+    except Exception as e:
+        log.warning(f"  Existing keys fetch error: {e}")
     return keys
 
 def append_rows_to_sheet(ws, rows):
     if rows:
-        ws.append_rows(rows, value_input_option="RAW")
+        sheets_call_with_retry(ws.append_rows, rows, value_input_option="RAW")
         log.info(f"  ✓ {len(rows)} rows sheet mein likhe")
 
 
 # ============================================================
-#  MAIN — Time based limit
+#  MAIN — Time based limit + Fixed state logic
 # ============================================================
 def main():
-    log.info("=== Dental Scraper v12 Start ===")
+    log.info("=== Dental Scraper v13 Start ===")
     log.info(f"=== Run limit: {RUN_MINUTES} minutes ===")
 
     ws, state_ws = get_sheet()
     existing     = get_existing_keys(ws)
     log.info(f"Sheet mein already {len(existing)} records hain")
 
-    # State Google Sheets se load karo
     state      = load_state_from_sheet(state_ws)
     city_idx   = state["city_idx"]
     source_idx = state["source_idx"]
     page       = state["page"]
     log.info(f"Resume from → city:{city_idx} source:{source_idx} page:{page}")
 
-    collected    = 0
-    batch        = []
+    collected     = 0
+    batch         = []
     seen_websites = set()
 
-    # ── TIME LIMIT SETUP ──
-    start_time   = time.time()
-    limit_secs   = RUN_MINUTES * 60
+    start_time  = time.time()
+    limit_secs  = RUN_MINUTES * 60
 
     def time_remaining():
         return limit_secs - (time.time() - start_time)
 
     def time_up():
-        return time_remaining() <= 30   # 30 sec buffer — graceful stop
+        return time_remaining() <= TIME_BUFFER
+
+    # FIX #9: Source wrap — clean cycle tracking
+    total_sources = len(SOURCES)
+    all_done      = False
 
     try:
-        while not time_up():
+        while not time_up() and not all_done:
             if city_idx >= len(CITIES):
-                city_idx   = 0
-                source_idx = (source_idx + 1) % len(SOURCES)
-                page       = 1
-                log.info(f"  All cities done — switching to: {SOURCES[source_idx]}")
-                # Agar saare sources bhi done ho gaye
-                if source_idx == 0:
-                    log.info("=== Saara data collect ho gaya! Scraper complete. ===")
+                city_idx    = 0
+                source_idx += 1
+                page        = 1
+                if source_idx >= total_sources:
+                    log.info("=== Saare sources aur cities complete! ===")
+                    all_done = True
                     break
+                log.info(f"  Switching source → {SOURCES[source_idx]}")
 
             city   = CITIES[city_idx]
             source = SOURCES[source_idx]
@@ -606,7 +659,7 @@ def main():
                 else:
                     rows, has_more = scrape_clinicspots(city, page)
             except Exception as e:
-                log.error(f"  ERROR: {e}")
+                log.error(f"  Scrape ERROR: {e}")
                 city_idx += 1
                 page      = 1
                 time.sleep(3)
@@ -630,10 +683,14 @@ def main():
                     seen_websites.add(web_key)
                 collected += 1
 
-            # Batch save karo
+            # FIX #7: Batch aur state ko alag try/except mein — ek fail ho toh doosra nahi rukta
             if len(batch) >= BATCH_SIZE:
-                append_rows_to_sheet(ws, batch)
-                batch = []
+                try:
+                    append_rows_to_sheet(ws, batch)
+                    batch = []
+                except Exception as e:
+                    log.error(f"  Batch save failed (data memory mein rakha): {e}")
+                    # batch clear NAHI kiya — retry hoga next iteration mein
 
             if has_more and not time_up():
                 page += 1
@@ -645,15 +702,23 @@ def main():
 
     finally:
         close_pw()
-        # Bacha hua batch save karo
+
+        # FIX #7: Batch aur state alag alag save — ek fail ho toh doosra try kare
         if batch:
-            append_rows_to_sheet(ws, batch)
-        # State save karo — next run yahan se shuru hoga
-        save_state_to_sheet(state_ws, {
-            "city_idx"  : city_idx,
-            "source_idx": source_idx,
-            "page"      : page
-        })
+            try:
+                append_rows_to_sheet(ws, batch)
+            except Exception as e:
+                log.error(f"  Final batch save failed: {e}")
+
+        try:
+            save_state_to_sheet(state_ws, {
+                "city_idx"  : city_idx,
+                "source_idx": source_idx,
+                "page"      : page
+            })
+        except Exception as e:
+            log.error(f"  Final state save failed: {e}")
+
         elapsed = int(time.time() - start_time)
         log.info(f"=== DONE | +{collected} is run mein | {elapsed}s chala | Total known: {len(existing)} ===")
 
