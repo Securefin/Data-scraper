@@ -1,89 +1,39 @@
-# ─────────────────────────────────────────────────────────────
-#  Dental Clinic Scraper — Daily GitHub Actions Workflow
-#  File path: .github/workflows/scraper.yml
-# ─────────────────────────────────────────────────────────────
+# .github/workflows/scraper.yml
 
-name: Dental Scraper Daily
+name: Dental Scraper
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # Daily raat 3 baje UTC = subah 8:30 IST
-  workflow_dispatch:        # Manual run ka button bhi rahega
+    # Din mein 4 baar — har 6 ghante mein (UTC time)
+    - cron: "0 1 * * *"    # IST 6:30 AM
+    - cron: "0 7 * * *"    # IST 12:30 PM
+    - cron: "0 13 * * *"   # IST 6:30 PM
+    - cron: "0 19 * * *"   # IST 12:30 AM
+  workflow_dispatch:        # Manual trigger bhi possible
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 55     # 55 min max — daily limit hit hone se pehle stop
+    timeout-minutes: 15     # 10 min scraping + 5 min setup buffer
 
     steps:
-      # 1. Code checkout
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. State file restore (pichle run ka progress)
-      - name: Restore state
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: scraper-state-${{ github.run_id }}
-          restore-keys: |
-            scraper-state-
-
-      # 3. Python setup
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # 4. Python dependencies install
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
-
-      # 5. Playwright Chromium cache — pehli baar install hoga, baad mein cache se milega
-      - name: Cache Playwright Chromium
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-
-      # Ubuntu 24.04 (Noble) pe libasound2 → libasound2t64 rename ho gaya
-      # --with-deps se conflict aata hai, isliye manually fix karte hain
-      - name: Fix Ubuntu 24.04 libasound2 issue
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2t64 libatk1.0-0 libatk-bridge2.0-0 \
-            libcups2 libdrm2 libgbm1 libnss3 libxcomposite1 libxdamage1 \
-            libxfixes3 libxkbcommon0 libxrandr2 libpango-1.0-0 libcairo2
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install chromium
-
-      - name: Install Playwright system deps only (cache hit pe)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: echo "Cache hit — skipping browser download"
-
-      # 6. Main scraper (JustDial, Sulekha, Clinicspots)
-      - name: Run main scraper
+      - name: Run scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
+          RUN_MINUTES: "10"
         run: python scraper.py
-
-      # 7. Social media scraper (Instagram + Facebook)
-      - name: Run social scraper
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          INSTAGRAM_COOKIES: ${{ secrets.INSTAGRAM_COOKIES }}
-        run: python social_scraper.py
-
-      # 7. State file save (next run ke liye)
-      - name: Save state
-        if: always()   # error aaye toh bhi state save karo
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: scraper-state-${{ github.run_id }}
