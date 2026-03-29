@@ -3,15 +3,14 @@ name: Dental Scraper
 
 on:
   schedule:
-    - cron: "0 2 * * *"     # IST 7:30 AM
-    - cron: "0 10 * * *"    # IST 3:30 PM
-    - cron: "0 18 * * *"    # IST 11:30 PM
+    - cron: "0 3 * * *"     # IST 8:30 AM
+    - cron: "0 15 * * *"    # IST 8:30 PM
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 25      # 5min setup + 17min scraping + 3min buffer
+    timeout-minutes: 38      # 2min setup + 30min scraping + 6min buffer
 
     steps:
       - name: Checkout code
@@ -22,6 +21,14 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
@@ -36,5 +43,5 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          RUN_MINUTES: 17
+          RUN_MINUTES: 30
         run: python scraper.py
