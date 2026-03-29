@@ -1,16 +1,10 @@
 """
-India Dental Clinic Scraper v11
+India Dental Clinic Scraper v12
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Sources:
-  1. Google Maps  — maps.google.com (NO API KEY) — real mobile numbers ✅
-  2. Sulekha      — sulekha.com/dentists/{city}
-  3. Clinicspots  — clinicspots.com/dentist/{city}
-
-Google Maps se:
-  - Real phone numbers (mobile + landline dono)
-  - Website URL (blank = hot lead)
-  - Address, Rating, Reviews
-  - Koi API key nahi chahiye
+Changes from v11:
+  - Time-based limit (RUN_MINUTES) — records ki jagah time dekha
+  - State Google Sheets mein save hoti hai (7-day cache problem fix)
+  - DAILY_LIMIT hata diya — ab time se control hoga
 """
 
 import os, re, time, random, json, logging, hashlib
@@ -31,10 +25,11 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ─────────────────────────────────────────────────
-DAILY_LIMIT  = 200
+RUN_MINUTES  = int(os.environ.get("RUN_MINUTES", 10))   # Har run kitne minutes chale
 SHEET_NAME   = "Business Data"
-BATCH_SIZE   = 20
-MAX_PAGES    = 5     # Google Maps pe zyada pages nahi hote
+STATE_SHEET  = "Scraper State"                           # State is sheet mein save hogi
+BATCH_SIZE   = 10
+MAX_PAGES    = 5
 HEADERS_ROW  = [
     "Name", "Category", "Phone", "Email", "Website",
     "Address", "City", "State", "Rating", "Reviews",
@@ -103,28 +98,13 @@ CITIES = [
 
 SOURCES = ["googlemaps", "sulekha", "clinicspots"]
 
-# ─── STATE ──────────────────────────────────────────────────
-STATE_FILE = "state.json"
-
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {"city_idx": 0, "source_idx": 0, "page": 1}
-
-def save_state(s):
-    with open(STATE_FILE, "w") as f:
-        json.dump(s, f)
-
 # ─── UTILS ──────────────────────────────────────────────────
 def make_key(name, phone, address):
     return hashlib.md5(f"{name}|{phone}|{address}".lower().strip().encode()).hexdigest()
 
 def make_website_key(website):
-    """Same website wale duplicates avoid karo."""
     if not website:
         return ""
-    # Domain nikalo — https://www.clinic.com/page → clinic.com
     m = re.search(r"https?://(?:www\.)?([^/]+)", website.lower())
     return m.group(1) if m else website.lower().strip()
 
@@ -135,7 +115,6 @@ MOBILE_RE = re.compile(r"(?<!\d)(?:\+91[\s\-]?)?([6-9]\d{9})(?!\d)")
 PHONE_RE  = re.compile(r"(?<!\d)(\+?91[\s\-]?\d{10}|\d{10}|\d{3,5}[\s\-]\d{6,8})(?!\d)")
 
 def extract_phone(text):
-    """Mobile pehle try karo, nahi mila toh any phone."""
     t = re.sub(r"\s+", "", text)
     m = MOBILE_RE.search(t)
     if m:
@@ -243,14 +222,9 @@ def close_pw():
 
 
 # ============================================================
-#  SOURCE 1 — Google Maps (NO API KEY)
-#  Playwright se real phone numbers milte hain
+#  SOURCE 1 — Google Maps
 # ============================================================
 def scrape_googlemaps(city, page=1):
-    """
-    Google Maps search → results scroll karo → har listing click karo → phone nikalo.
-    Page = scroll count (har scroll ~20 results load karta hai)
-    """
     query   = f"dental+clinic+{city['city']}+India"
     map_url = f"https://www.google.com/maps/search/{query}"
     rows    = []
@@ -259,48 +233,39 @@ def scrape_googlemaps(city, page=1):
     pg  = ctx.new_page()
 
     try:
-        pg.goto(map_url, timeout=40000, wait_until="domcontentloaded")
+        pg.goto(map_url, timeout=25000, wait_until="domcontentloaded")
 
-        # Cookie consent dismiss karo agar aaye
         try:
             pg.click("button[aria-label*='Accept'], button[jsname='b3VHJd']", timeout=4000)
         except Exception:
             pass
 
-        # Results panel load hone do
         try:
             pg.wait_for_selector("div[role='feed'], div.Nv2PK", timeout=15000)
         except PWTimeout:
             log.warning(f"  GMaps {city['city']}: results load nahi hue")
             return [], False
 
-        # Page ke hisaab se scroll karo — zyada results load karo
         feed_sel = "div[role='feed']"
         for _ in range(page * 3):
             try:
-                pg.eval_on_selector(feed_sel,
-                    "el => el.scrollBy(0, el.scrollHeight)")
+                pg.eval_on_selector(feed_sel, "el => el.scrollBy(0, el.scrollHeight)")
                 pg.wait_for_timeout(1500)
             except Exception:
                 break
 
-        # Saari listing cards collect karo
         cards = pg.query_selector_all("div.Nv2PK, div[jsaction*='mouseover:pane']")
         log.info(f"  GMaps {city['city']}: {len(cards)} cards mili")
 
         processed = 0
         for card in cards:
-            if processed >= 20:   # ek page pe max 20
+            if processed >= 20:
                 break
             try:
                 card.click()
-                pg.wait_for_timeout(2000)
+                pg.wait_for_timeout(1500)   # 2s → 1.5s
 
-                # Detail panel mein phone dhundho
-                # Google Maps phone aria-label mein hota hai
                 phone = ""
-
-                # Method 1: aria-label se
                 phone_btn = pg.query_selector(
                     "button[data-tooltip='Copy phone number'], "
                     "button[aria-label*='phone'], "
@@ -312,24 +277,18 @@ def scrape_googlemaps(city, page=1):
                     href  = phone_btn.get_attribute("href") or ""
                     phone = extract_phone(label + " " + href)
 
-                # Method 2: tel: link se
                 if not phone:
                     tel = pg.query_selector("a[href^='tel:']")
                     if tel:
                         href  = tel.get_attribute("href") or ""
                         phone = extract_phone(href.replace("tel:",""))
 
-                # Method 3: visible text se
                 if not phone:
-                    detail_html = pg.inner_html(
-                        "div[role='main'], div.m6QErb[data-value]",
-                    ) if pg.query_selector("div[role='main']") else ""
+                    detail_html = pg.inner_html("div[role='main'], div.m6QErb[data-value]") \
+                        if pg.query_selector("div[role='main']") else ""
                     if detail_html:
-                        phone = extract_phone(
-                            BeautifulSoup(detail_html,"html.parser").get_text()
-                        )
+                        phone = extract_phone(BeautifulSoup(detail_html,"html.parser").get_text())
 
-                # Name
                 name = ""
                 name_el = pg.query_selector("h1.DUwDvf, h1[class*='fontHeadline']")
                 if name_el:
@@ -339,7 +298,6 @@ def scrape_googlemaps(city, page=1):
                     processed += 1
                     continue
 
-                # Address
                 address = city["city"]
                 addr_el = pg.query_selector(
                     "button[data-tooltip='Copy address'] div.rogA2c, "
@@ -348,7 +306,6 @@ def scrape_googlemaps(city, page=1):
                 if addr_el:
                     address = addr_el.inner_text().strip() or city["city"]
 
-                # Website — har clinic ka alag hona chahiye
                 website = ""
                 try:
                     web_el = pg.query_selector(
@@ -358,8 +315,6 @@ def scrape_googlemaps(city, page=1):
                     )
                     if web_el:
                         href = web_el.get_attribute("href") or ""
-                        # Google Maps redirect URLs clean karo
-                        # Format: /url?q=https://clinic.com&...
                         if "/url?q=" in href:
                             import urllib.parse
                             website = urllib.parse.parse_qs(
@@ -370,13 +325,11 @@ def scrape_googlemaps(city, page=1):
                 except Exception:
                     website = ""
 
-                # Rating
                 rating = ""
                 rat_el = pg.query_selector("div.F7nice span[aria-hidden='true']")
                 if rat_el:
                     rating = rat_el.inner_text().strip()
 
-                # Reviews count
                 reviews = ""
                 rev_el  = pg.query_selector("div.F7nice span[aria-label*='review']")
                 if rev_el:
@@ -395,7 +348,7 @@ def scrape_googlemaps(city, page=1):
 
                 processed += 1
                 log.info(f"    ✓ {name} | {phone or 'no phone'}")
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(random.uniform(0.8, 1.5))   # wait kam kiya
 
             except Exception as e:
                 log.warning(f"    Card error: {e}")
@@ -407,7 +360,6 @@ def scrape_googlemaps(city, page=1):
     finally:
         pg.close()
 
-    # has_more: agar 20 results mile toh aur ho sakte hain
     has_more = len(rows) >= 18 and page < MAX_PAGES
     phone_count = sum(1 for r in rows if r[2])
     log.info(f"  GMaps {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
@@ -415,7 +367,7 @@ def scrape_googlemaps(city, page=1):
 
 
 # ============================================================
-#  SOURCE 2 — Sulekha (requests)
+#  SOURCE 2 — Sulekha
 # ============================================================
 def scrape_sulekha(city, page=1):
     base = "https://www.sulekha.com"
@@ -449,7 +401,7 @@ def scrape_sulekha(city, page=1):
 
 
 # ============================================================
-#  SOURCE 3 — Clinicspots (requests)
+#  SOURCE 3 — Clinicspots
 # ============================================================
 def scrape_clinicspots(city, page=1):
     base = "https://www.clinicspots.com"
@@ -482,7 +434,7 @@ def scrape_clinicspots(city, page=1):
 
 
 # ============================================================
-#  GOOGLE SHEETS
+#  GOOGLE SHEETS — Data + State dono yahan save hoga
 # ============================================================
 def get_sheet():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
@@ -495,6 +447,8 @@ def get_sheet():
     )
     client = gspread.authorize(creds)
     sheet  = client.open_by_key(sheet_id)
+
+    # Data sheet
     try:
         ws = sheet.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
@@ -504,7 +458,44 @@ def get_sheet():
             "textFormat"     : {"bold":True,"foregroundColor":{"red":1,"green":1,"blue":1}},
             "backgroundColor": {"red":0.1,"green":0.45,"blue":0.9}
         })
-    return ws
+
+    # State sheet — ek alag sheet mein state save karenge
+    try:
+        state_ws = sheet.worksheet(STATE_SHEET)
+    except gspread.WorksheetNotFound:
+        state_ws = sheet.add_worksheet(STATE_SHEET, rows=10, cols=5)
+        state_ws.append_row(["city_idx", "source_idx", "page", "updated_at"])
+        state_ws.append_row([0, 0, 1, now_ist()])
+
+    return ws, state_ws
+
+def load_state_from_sheet(state_ws):
+    """State Google Sheets se load karo."""
+    try:
+        rows = state_ws.get_all_values()
+        if len(rows) >= 2:
+            data = rows[1]  # Row 2 = actual data
+            return {
+                "city_idx"  : int(data[0]),
+                "source_idx": int(data[1]),
+                "page"      : int(data[2])
+            }
+    except Exception as e:
+        log.warning(f"State load error: {e}")
+    return {"city_idx": 0, "source_idx": 0, "page": 1}
+
+def save_state_to_sheet(state_ws, state):
+    """State Google Sheets mein save karo."""
+    try:
+        state_ws.update("A2:D2", [[
+            state["city_idx"],
+            state["source_idx"],
+            state["page"],
+            now_ist()
+        ]])
+        log.info(f"  State saved → city:{state['city_idx']} source:{state['source_idx']} page:{state['page']}")
+    except Exception as e:
+        log.error(f"State save error: {e}")
 
 def get_existing_keys(ws):
     keys = set()
@@ -521,34 +512,53 @@ def append_rows_to_sheet(ws, rows):
 
 
 # ============================================================
-#  MAIN
+#  MAIN — Time based limit
 # ============================================================
 def main():
-    log.info("=== Dental Scraper v11 Start ===")
-    ws       = get_sheet()
-    existing = get_existing_keys(ws)
+    log.info("=== Dental Scraper v12 Start ===")
+    log.info(f"=== Run limit: {RUN_MINUTES} minutes ===")
+
+    ws, state_ws = get_sheet()
+    existing     = get_existing_keys(ws)
     log.info(f"Sheet mein already {len(existing)} records hain")
 
-    state      = load_state()
+    # State Google Sheets se load karo
+    state      = load_state_from_sheet(state_ws)
     city_idx   = state["city_idx"]
     source_idx = state["source_idx"]
     page       = state["page"]
+    log.info(f"Resume from → city:{city_idx} source:{source_idx} page:{page}")
 
-    collected = 0
-    batch     = []
-    seen_websites = set()  # same website baar baar save nahi hogi
+    collected    = 0
+    batch        = []
+    seen_websites = set()
+
+    # ── TIME LIMIT SETUP ──
+    start_time   = time.time()
+    limit_secs   = RUN_MINUTES * 60
+
+    def time_remaining():
+        return limit_secs - (time.time() - start_time)
+
+    def time_up():
+        return time_remaining() <= 30   # 30 sec buffer — graceful stop
 
     try:
-        while collected < DAILY_LIMIT:
+        while not time_up():
             if city_idx >= len(CITIES):
                 city_idx   = 0
                 source_idx = (source_idx + 1) % len(SOURCES)
                 page       = 1
                 log.info(f"  All cities done — switching to: {SOURCES[source_idx]}")
+                # Agar saare sources bhi done ho gaye
+                if source_idx == 0:
+                    log.info("=== Saara data collect ho gaya! Scraper complete. ===")
+                    break
 
             city   = CITIES[city_idx]
             source = SOURCES[source_idx]
-            log.info(f"[{collected}/{DAILY_LIMIT}] {source} | {city['city']} | page {page}")
+            elapsed = int(time.time() - start_time)
+            log.info(f"[{elapsed}s/{limit_secs}s] {source} | {city['city']} | page {page}")
 
             try:
                 if source == "googlemaps":
@@ -565,12 +575,11 @@ def main():
                 continue
 
             for row in rows:
-                if collected >= DAILY_LIMIT:
+                if time_up():
                     break
                 key     = make_key(str(row[0]), str(row[2]), str(row[5]))
                 web_key = make_website_key(str(row[4]))
 
-                # Duplicate check — name+phone+address ya same website
                 if key in existing:
                     continue
                 if web_key and web_key in seen_websites:
@@ -583,24 +592,32 @@ def main():
                     seen_websites.add(web_key)
                 collected += 1
 
+            # Batch save karo
             if len(batch) >= BATCH_SIZE:
                 append_rows_to_sheet(ws, batch)
                 batch = []
 
-            if has_more and collected < DAILY_LIMIT:
+            if has_more and not time_up():
                 page += 1
-                time.sleep(random.uniform(3.0, 5.0))
+                time.sleep(random.uniform(2.0, 4.0))
             else:
                 page      = 1
                 city_idx += 1
-                time.sleep(random.uniform(4.0, 7.0))  # Maps pe thoda zyada wait
+                time.sleep(random.uniform(3.0, 5.0))
 
     finally:
         close_pw()
+        # Bacha hua batch save karo
         if batch:
             append_rows_to_sheet(ws, batch)
-        save_state({"city_idx": city_idx, "source_idx": source_idx, "page": page})
-        log.info(f"=== DONE | +{collected} aaj | Total known: {len(existing)} ===")
+        # State save karo — next run yahan se shuru hoga
+        save_state_to_sheet(state_ws, {
+            "city_idx"  : city_idx,
+            "source_idx": source_idx,
+            "page"      : page
+        })
+        elapsed = int(time.time() - start_time)
+        log.info(f"=== DONE | +{collected} is run mein | {elapsed}s chala | Total known: {len(existing)} ===")
 
 
 if __name__ == "__main__":
