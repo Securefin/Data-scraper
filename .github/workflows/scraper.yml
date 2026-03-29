@@ -1,20 +1,18 @@
 # .github/workflows/scraper.yml
-
 name: Dental Scraper
 
 on:
   schedule:
-    # Din mein 4 baar — har 6 ghante mein (UTC time)
-    - cron: "0 1 * * *"    # IST 6:30 AM
-    - cron: "0 7 * * *"    # IST 12:30 PM
-    - cron: "0 13 * * *"   # IST 6:30 PM
-    - cron: "0 19 * * *"   # IST 12:30 AM
-  workflow_dispatch:        # Manual trigger bhi possible
+    - cron: "0 1 * * *"     # IST 6:30 AM
+    - cron: "0 7 * * *"     # IST 12:30 PM
+    - cron: "0 13 * * *"    # IST 6:30 PM
+    - cron: "0 19 * * *"    # IST 12:30 AM
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 15     # 10 min scraping + 5 min setup buffer
+    timeout-minutes: 30      # FIX: 15 → 30 (setup ~5min + scraping 20min + buffer 5min)
 
     steps:
       - name: Checkout code
@@ -31,11 +29,11 @@ jobs:
           pip install -r requirements.txt
           pip install --upgrade playwright
           playwright install chromium
-          playwright install-deps chromium
+          sudo playwright install-deps chromium    # FIX: sudo add kiya
 
       - name: Run scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          RUN_MINUTES: "10"
+          RUN_MINUTES: 20                          # FIX: 10 → 20, string → integer
         run: python scraper.py
