@@ -38,6 +38,7 @@ jobs:
           pip install --upgrade playwright
           python -m playwright install chromium
           sudo $(which python) -m playwright install-deps chromium
+          python -m crawl4ai.install  # Crawl4AI browser setup
 
       - name: Run scraper
         env:
