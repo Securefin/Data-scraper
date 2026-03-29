@@ -109,7 +109,7 @@ CITIES = [
     {"city":"Salem",              "state":"Tamil Nadu",     "cs":"salem",              "sl":"salem"},
 ]
 
-SOURCES = ["sulekha", "clinicspots", "googlemaps"]  # GMaps last — bot detection risk kam
+SOURCES = ["justdial", "clinicspots", "googlemaps"]  # Sulekha hata diya — phone nahi milta
 
 # ─── UTILS ──────────────────────────────────────────────────
 def make_key(name, phone, address):
@@ -148,7 +148,13 @@ def now_ist():
 MOBILE_RE = re.compile(r"(?<!\d)(?:\+91[\s\-]?)?([6-9]\d{9})(?!\d)")
 PHONE_RE  = re.compile(r"(?<!\d)(\+?91[\s\-]?\d{10}|\d{10}|\d{3,5}[\s\-]\d{6,8})(?!\d)")
 
+WAME_RE = re.compile(r"wa\.me/(?:91)?([6-9]\d{9})")
+
 def extract_phone(text):
+    # wa.me WhatsApp links pehle check karo
+    m = WAME_RE.search(text)
+    if m:
+        return m.group(1)
     t = re.sub(r"\s+", "", text)
     m = MOBILE_RE.search(t)
     if m:
@@ -426,17 +432,167 @@ def scrape_googlemaps(city, page=1):
 
 
 # ============================================================
+#  SOURCE 1b — JustDial (Best phone number coverage)
+# ============================================================
+JD_PHONE_RE = re.compile(r"callnow[^>]*data-phone[^>]*=[^>]*['\"](\d{10})['\"]", re.I)
+JD_ENC_RE   = re.compile(r"['\"]callcontent['\"][^>]*>(.*?)</", re.I | re.S)
+
+def decode_jd_phone(encoded):
+    """JustDial ka encoded phone decode karo."""
+    try:
+        # JustDial simple rotation cipher use karta hai
+        key = "8376543219"
+        dec = ""
+        for i, ch in enumerate(encoded):
+            if ch.isdigit():
+                dec += key[(int(ch) + i) % 10]
+            else:
+                dec += ch
+        m = MOBILE_RE.search(dec)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+def scrape_justdial(city, page=1):
+    base     = "https://www.justdial.com"
+    city_slug = city["cs"]
+    url      = f"{base}/{city_slug}/Dentists/nct-10215524/page-{page}"
+    ctx      = get_pw_ctx()
+    pg       = None
+    rows     = []
+
+    try:
+        pg = ctx.new_page()
+
+        # JustDial pe cookie consent aur login popup aata hai
+        pg.goto(url, timeout=25000, wait_until="domcontentloaded")
+        pg.wait_for_timeout(2500)
+
+        # Popup band karo agar aaye
+        for sel in [
+            "button[class*='close']",
+            "span[class*='close']",
+            "div[class*='modal'] button",
+            "[aria-label='Close']"
+        ]:
+            try:
+                pg.click(sel, timeout=2000)
+                break
+            except Exception:
+                pass
+
+        # Cards load hone do
+        try:
+            pg.wait_for_selector("li[class*='resultbox']", timeout=12000)
+        except PWTimeout:
+            log.warning(f"  JustDial {city['city']}: cards load nahi hue")
+            return [], False
+
+        # Thoda scroll karo — lazy load ke liye
+        for _ in range(3):
+            pg.evaluate("window.scrollBy(0, window.innerHeight)")
+            pg.wait_for_timeout(1000)
+
+        html = pg.content()
+        soup = BeautifulSoup(html, "html.parser")
+
+        cards = soup.find_all("div", class_=re.compile(r"resultbox_textbox", re.I))
+        log.info(f"  JustDial {city['city']}: {len(cards)} cards mili")
+
+        for card in cards:
+            # Name — resultbox_title_anchor span mein hai
+            name_el = (
+                card.find("span", class_=re.compile(r"resultbox_title_anchor", re.I)) or
+                card.find(["h2", "h3"], class_=re.compile(r"resultbox_title", re.I))
+            )
+            if not name_el:
+                continue
+            name = name_el.get_text(strip=True)
+            if not name or len(name) < 4:
+                continue
+
+            # Phone — callcontent span mein directly hota hai JustDial pe
+            phone = ""
+
+            # Method 1: callcontent class — PRIMARY (confirmed from HTML)
+            cc_el = card.find(class_=re.compile(r"callcontent", re.I))
+            if cc_el:
+                phone = extract_phone(cc_el.get_text(strip=True))
+
+            # Method 2: data-phone attribute — fallback
+            if not phone:
+                ph_el = card.find(attrs={"data-phone": True})
+                if ph_el:
+                    phone = extract_phone(ph_el["data-phone"])
+
+            # Method 3: tel: link — fallback
+            if not phone:
+                tel = card.find("a", href=re.compile(r"tel:"))
+                if tel:
+                    phone = extract_phone(tel["href"].replace("tel:", ""))
+
+            addr_el = card.find(class_=re.compile(r"addr|address|locatoin|location", re.I))
+            rat_el  = card.find(class_=re.compile(r"rating|green|star", re.I))
+            rev_el  = card.find(class_=re.compile(r"review|ratingcount|votes", re.I))
+
+            address = addr_el.get_text(strip=True) if addr_el else city["city"]
+            rating  = rat_el.get_text(strip=True)  if rat_el  else ""
+            reviews = rev_el.get_text(strip=True)  if rev_el  else ""
+
+            rows.append([
+                name, "Dental Clinic", phone, "", "",
+                address, city["city"], city["state"],
+                rating, reviews,
+                url, now_ist(), "JustDial"
+            ])
+
+        has_more = check_has_more(soup, page) or (len(rows) >= 8 and page < MAX_PAGES)
+        phone_count = sum(1 for r in rows if r[2])
+        log.info(f"  JustDial {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
+        return rows, has_more
+
+    except Exception as e:
+        log.error(f"  JustDial {city['city']} error: {e}")
+        return [], False
+    finally:
+        if pg:
+            try: pg.close()
+            except: pass
+
+
+# ============================================================
 #  SOURCE 2 — Sulekha
 # ============================================================
 def scrape_sulekha(city, page=1):
     base = "https://www.sulekha.com"
     url  = f"{base}/dentists/{city['sl']}?page={page}"
-    sess = new_session(f"{base}/dentists/{city['sl']}")
-    html = get_html_req(sess, url)
+
+    # Playwright se fetch karo — JS rendered content ke liye
+    ctx  = get_pw_ctx()
+    pg   = None
+    html = None
+    try:
+        pg = ctx.new_page()
+        pg.goto(url, timeout=25000, wait_until="networkidle")
+        pg.wait_for_timeout(2000)   # JS render hone do
+        html = pg.content()
+    except Exception as e:
+        log.warning(f"  Sulekha Playwright fetch error: {e}")
+    finally:
+        if pg:
+            try: pg.close()
+            except: pass
+
+    # Fallback — requests se try karo
+    if not html:
+        sess = new_session(base)
+        html = get_html_req(sess, url)
     if not html:
         return [], False
+
     soup = BeautifulSoup(html, "html.parser")
     rows = parse_jsonld(soup, city, url, "Sulekha")
+
     if not rows:
         for card in soup.find_all("div", class_=re.compile(r"(serv|listing|provider|biz|card)", re.I)):
             nt = (card.find(["h2","h3","h4","a"], class_=re.compile(r"(name|title|biz|heading)", re.I))
@@ -446,14 +602,19 @@ def scrape_sulekha(city, page=1):
             name = nt.get_text(strip=True)
             if not name or len(name) < 4:
                 continue
-            phone = extract_phone(card.get_text(separator=" "))
-            at    = card.find(class_=re.compile(r"addr|address|location|area|locality", re.I))
-            rt    = card.find(class_=re.compile(r"rating|star|score", re.I))
-            rows.append([name,"Dental Clinic",phone,"","",
+
+            # Card ka poora HTML text mein wa.me links bhi honge ab
+            card_text = card.decode_contents()
+            phone = extract_phone(card_text) or extract_phone(card.get_text(separator=" "))
+
+            at = card.find(class_=re.compile(r"addr|address|location|area|locality", re.I))
+            rt = card.find(class_=re.compile(r"rating|star|score", re.I))
+            rows.append([name, "Dental Clinic", phone, "", "",
                 at.get_text(strip=True) if at else city["city"],
-                city["city"],city["state"],
-                rt.get_text(strip=True) if rt else "","",
-                url,now_ist(),"Sulekha"])
+                city["city"], city["state"],
+                rt.get_text(strip=True) if rt else "", "",
+                url, now_ist(), "Sulekha"])
+
     phone_count = sum(1 for r in rows if r[2])
     log.info(f"  Sulekha {city['city']} p{page}: {len(rows)} total | {phone_count} with phone")
     return rows, check_has_more(soup, page)
@@ -652,7 +813,9 @@ def main():
             log.info(f"[{elapsed}s/{limit_secs}s] {source} | {city['city']} | page {page}")
 
             try:
-                if source == "googlemaps":
+                if source == "justdial":
+                    rows, has_more = scrape_justdial(city, page)
+                elif source == "googlemaps":
                     rows, has_more = scrape_googlemaps(city, page)
                 elif source == "sulekha":
                     rows, has_more = scrape_sulekha(city, page)
