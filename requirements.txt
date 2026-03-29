@@ -3,3 +3,4 @@ beautifulsoup4
 playwright
 gspread
 google-auth
+crawl4ai>=0.8.5
