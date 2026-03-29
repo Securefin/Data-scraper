@@ -102,22 +102,41 @@ SOURCES = ["googlemaps", "sulekha", "clinicspots"]
 def make_key(name, phone, address):
     return hashlib.md5(f"{name}|{phone}|{address}".lower().strip().encode()).hexdigest()
 
-THIRD_PARTY_DOMAINS = [
-    "practo.com", "justdial.com", "sulekha.com",
-    "clinicspots.com", "lybrate.com", "credihealth.com",
-    "docprime.com", "medibuddy.in", "bajajfinservhealth.in",
-    "apollo247.com", "healthifyme.com", "mfine.co"
-]
+# Common words jo URL match mein ignore karne hain
+SKIP_WORDS = {
+    "dental", "clinic", "care", "centre", "center", "dr", "doctor",
+    "and", "the", "in", "of", "by", "my", "best", "new", "city",
+    "multispeciality", "multispecialty", "super", "speciality",
+    "specialty", "studio", "smile", "tooth", "teeth", "implant",
+    "orthodontic", "laser", "advanced", "family", "health", "india"
+}
 
-def is_third_party(url):
-    """Practo/Justdial jaisi third party URLs detect karo."""
+def is_own_website(business_name, url):
+    """
+    Business name ke meaningful words URL mein hain → apni website hai.
+    Nahi hain → third party hai.
+    """
     if not url:
         return False
-    url_lower = url.lower()
-    return any(domain in url_lower for domain in THIRD_PARTY_DOMAINS)
 
-def make_website_key(website):
-    if not website or is_third_party(website):
+    # Domain nikalo
+    m = re.search(r"https?://(?:www\.)?([^/]+)", url.lower())
+    if not m:
+        return False
+    domain = m.group(1)
+
+    # Business name ke words nikalo — short/common words skip karo
+    words = re.findall(r"[a-z]+", business_name.lower())
+    meaningful = [w for w in words if len(w) > 3 and w not in SKIP_WORDS]
+
+    if not meaningful:
+        return False
+
+    # Koi bhi meaningful word domain mein hai → apni website
+    return any(word in domain for word in meaningful)
+
+def make_website_key(website, business_name=""):
+    if not website or not is_own_website(business_name, website):
         return ""
     m = re.search(r"https?://(?:www\.)?([^/]+)", website.lower())
     return m.group(1) if m else website.lower().strip()
@@ -189,7 +208,7 @@ def parse_jsonld(soup, city, url, src):
                 phone = extract_phone(str(item.get("telephone","")))
                 addr_str = (addr.get("streetAddress","")+" "+addr.get("addressLocality","")).strip() or city["city"]
                 website = item.get("url","")
-                if is_third_party(website):
+                if not is_own_website(name, website):
                     website = ""
                 rows.append([name,"Dental Clinic",phone,"",website,
                     addr_str,city["city"],city["state"],
@@ -339,7 +358,7 @@ def scrape_googlemaps(city, page=1):
                             ).get("q", [""])[0]
                         elif href.startswith("http") and "google.com" not in href:
                             website = href
-                if is_third_party(website):
+                if not is_own_website(name, website):
                     website = ""
                 except Exception:
                     website = ""
@@ -597,7 +616,7 @@ def main():
                 if time_up():
                     break
                 key     = make_key(str(row[0]), str(row[2]), str(row[5]))
-                web_key = make_website_key(str(row[4]))
+                web_key = make_website_key(str(row[4]), str(row[0]))
 
                 if key in existing:
                     continue
