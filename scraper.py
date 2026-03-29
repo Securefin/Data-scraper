@@ -280,145 +280,196 @@ def close_pw():
 # ============================================================
 #  SOURCE 1 — Google Maps
 # ============================================================
+def _gmaps_extract_place_data(pg, place_url, city):
+    """
+    Ek individual place URL pe jaao aur data nikalo.
+    Card-click approach hata diya — DOM detach + same-number problem fix.
+    """
+    try:
+        pg.goto(place_url, timeout=20000, wait_until="domcontentloaded")
+        pg.wait_for_timeout(2000)
+
+        # Name
+        name = ""
+        for sel in ["h1.DUwDvf", "h1[class*='fontHeadline']", "h1"]:
+            el = pg.query_selector(sel)
+            if el:
+                name = el.inner_text().strip()
+                if name:
+                    break
+        if not name or len(name) < 4:
+            return None
+
+        # Phone — fresh page pe har baar naya number milega
+        phone = ""
+
+        # Method 1: tel: link
+        tel = pg.query_selector("a[href^='tel:']")
+        if tel:
+            phone = extract_phone((tel.get_attribute("href") or "").replace("tel:", ""))
+
+        # Method 2: Copy phone button
+        if not phone:
+            for sel in [
+                "button[data-tooltip='Copy phone number']",
+                "button[aria-label*='phone']",
+                "button[data-item-id*='phone']",
+            ]:
+                btn = pg.query_selector(sel)
+                if btn:
+                    label = (btn.get_attribute("aria-label") or
+                             btn.get_attribute("data-value") or
+                             btn.inner_text() or "")
+                    phone = extract_phone(label)
+                    if phone:
+                        break
+
+        # Method 3: poore main panel ka text scan karo
+        if not phone:
+            try:
+                html = pg.inner_html("div[role='main']")
+                phone = extract_phone(
+                    BeautifulSoup(html, "html.parser").get_text(separator=" ")
+                )
+            except Exception:
+                pass
+
+        # Address
+        address = city["city"]
+        for sel in [
+            "button[data-tooltip='Copy address'] div.rogA2c",
+            "button[data-item-id='address'] div.rogA2c",
+            "div[data-section-id='ad'] span",
+        ]:
+            el = pg.query_selector(sel)
+            if el:
+                t = el.inner_text().strip()
+                if t:
+                    address = t
+                    break
+
+        # Website
+        website = ""
+        try:
+            for sel in [
+                "a[data-tooltip='Open website']",
+                "a[aria-label*='website']",
+                "a[data-item-id='authority']",
+            ]:
+                el = pg.query_selector(sel)
+                if el:
+                    href = el.get_attribute("href") or ""
+                    if "/url?q=" in href:
+                        website = urllib.parse.parse_qs(
+                            urllib.parse.urlparse(href).query
+                        ).get("q", [""])[0]
+                    elif href.startswith("http") and "google.com" not in href:
+                        website = href
+                    if website:
+                        break
+            if not is_own_website(name, website):
+                website = ""
+        except Exception:
+            website = ""
+
+        # Rating + Reviews
+        rating, reviews = "", ""
+        rat_el = pg.query_selector("div.F7nice span[aria-hidden='true']")
+        if rat_el:
+            rating = rat_el.inner_text().strip()
+        rev_el = pg.query_selector("div.F7nice span[aria-label*='review']")
+        if rev_el:
+            rm = re.search(r"[\d,]+", rev_el.get_attribute("aria-label") or "")
+            if rm:
+                reviews = rm.group(0)
+
+        return [name, "Dental Clinic", phone, "", website,
+                address, city["city"], city["state"],
+                rating, reviews, place_url, now_ist(), "Google Maps"]
+
+    except Exception as e:
+        log.warning(f"    Place fetch error: {e}")
+        return None
+
+
 def scrape_googlemaps(city, page=1):
     query   = f"dental+clinic+{city['city']}+India"
     map_url = f"https://www.google.com/maps/search/{query}"
     rows    = []
-
-    ctx = get_pw_ctx()
-    pg  = None  # FIX #2: NameError se bachne ke liye pehle None
+    ctx     = get_pw_ctx()
+    pg      = None
 
     try:
         pg = ctx.new_page()
         pg.goto(map_url, timeout=25000, wait_until="domcontentloaded")
 
+        # Cookie consent
         try:
             pg.click("button[aria-label*='Accept'], button[jsname='b3VHJd']", timeout=4000)
         except Exception:
             pass
 
+        # Results load hone do
         try:
             pg.wait_for_selector("div[role='feed'], div.Nv2PK", timeout=15000)
         except PWTimeout:
             log.warning(f"  GMaps {city['city']}: results load nahi hue")
             return [], False
 
+        # Scroll karke zyada cards load karo
         feed_sel = "div[role='feed']"
-        for _ in range(page * 3):
+        for _ in range(page * 4):
             try:
                 pg.eval_on_selector(feed_sel, "el => el.scrollBy(0, el.scrollHeight)")
-                pg.wait_for_timeout(1500)
+                pg.wait_for_timeout(1200)
             except Exception:
                 break
 
-        cards = pg.query_selector_all("div.Nv2PK, div[jsaction*='mouseover:pane']")
-        log.info(f"  GMaps {city['city']}: {len(cards)} cards mili")
+        # Har card ka href nikalo — click NAHI karna, sirf URL collect karo
+        place_urls = pg.evaluate("""
+            () => {
+                const links = [];
+                document.querySelectorAll('a[href*="/maps/place/"]').forEach(a => {
+                    const h = a.href.split('?')[0];
+                    if (h && !links.includes(h)) links.push(h);
+                });
+                return links.slice(0, 20);
+            }
+        """)
 
+        log.info(f"  GMaps {city['city']}: {len(place_urls)} place URLs mili")
+
+        # List page band karo — ab individual pages pe jaayenge
+        pg.close()
+        pg = None
+
+        # Har URL pe fresh page open karo — DOM detach + same-number dono fix
         processed = 0
-        for card in cards:
+        for url in place_urls:
             if processed >= 20:
                 break
+            detail_pg = None
             try:
-                card.click(timeout=5000)
-                pg.wait_for_timeout(2000)  # FIX #6: 1.5s → 2s
-
-                phone = ""
-                phone_btn = pg.query_selector(
-                    "button[data-tooltip='Copy phone number'], "
-                    "button[aria-label*='phone'], "
-                    "a[href^='tel:']"
-                )
-                if phone_btn:
-                    label = phone_btn.get_attribute("aria-label") or \
-                            phone_btn.get_attribute("data-value") or ""
-                    href  = phone_btn.get_attribute("href") or ""
-                    phone = extract_phone(label + " " + href)
-
-                if not phone:
-                    tel = pg.query_selector("a[href^='tel:']")
-                    if tel:
-                        href  = tel.get_attribute("href") or ""
-                        phone = extract_phone(href.replace("tel:",""))
-
-                if not phone:
-                    detail_html = pg.inner_html("div[role='main'], div.m6QErb[data-value]") \
-                        if pg.query_selector("div[role='main']") else ""
-                    if detail_html:
-                        phone = extract_phone(BeautifulSoup(detail_html,"html.parser").get_text())
-
-                name = ""
-                name_el = pg.query_selector("h1.DUwDvf, h1[class*='fontHeadline']")
-                if name_el:
-                    name = name_el.inner_text().strip()
-
-                if not name or len(name) < 4:
-                    processed += 1
-                    continue
-
-                address = city["city"]
-                addr_el = pg.query_selector(
-                    "button[data-tooltip='Copy address'] div.rogA2c, "
-                    "div[data-section-id='ad'] span"
-                )
-                if addr_el:
-                    address = addr_el.inner_text().strip() or city["city"]
-
-                # FIX #1 + #3: urllib.parse top-level import, try/except indentation fix
-                website = ""
-                try:
-                    web_el = pg.query_selector(
-                        "a[data-tooltip='Open website'], "
-                        "a[aria-label*='website'], "
-                        "a[data-item-id='authority']"
-                    )
-                    if web_el:
-                        href = web_el.get_attribute("href") or ""
-                        if "/url?q=" in href:
-                            website = urllib.parse.parse_qs(
-                                urllib.parse.urlparse(href).query
-                            ).get("q", [""])[0]
-                        elif href.startswith("http") and "google.com" not in href:
-                            website = href
-                    # FIX #1: is_own_website check try ke ANDAR hai ab
-                    if not is_own_website(name, website):
-                        website = ""
-                except Exception:
-                    website = ""
-
-                rating = ""
-                rat_el = pg.query_selector("div.F7nice span[aria-hidden='true']")
-                if rat_el:
-                    rating = rat_el.inner_text().strip()
-
-                reviews = ""
-                rev_el  = pg.query_selector("div.F7nice span[aria-label*='review']")
-                if rev_el:
-                    rev_text = rev_el.get_attribute("aria-label") or ""
-                    rm = re.search(r"[\d,]+", rev_text)
-                    if rm:
-                        reviews = rm.group(0)
-
-                rows.append([
-                    name, "Dental Clinic",
-                    phone, "", website,
-                    address, city["city"], city["state"],
-                    rating, reviews,
-                    map_url, now_ist(), "Google Maps"
-                ])
-
+                detail_pg = ctx.new_page()
+                row = _gmaps_extract_place_data(detail_pg, url, city)
+                if row:
+                    rows.append(row)
+                    log.info(f"    ✓ {row[0]} | {row[2] or 'no phone'}")
                 processed += 1
-                log.info(f"    ✓ {name} | {phone or 'no phone'}")
-                time.sleep(random.uniform(2.0, 3.5))  # FIX #6: 0.8-1.5 → 2.0-3.5
-
+                time.sleep(random.uniform(2.5, 4.0))
             except Exception as e:
-                log.warning(f"    Card error: {e}")
+                log.warning(f"    URL error: {e}")
                 processed += 1
-                continue
+            finally:
+                if detail_pg:
+                    try:
+                        detail_pg.close()
+                    except Exception:
+                        pass
 
     except Exception as e:
         log.error(f"  GMaps {city['city']} error: {e}")
     finally:
-        # FIX #2: pg None check — crash pe NameError nahi aayega
         if pg is not None:
             try:
                 pg.close()
