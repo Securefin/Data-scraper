@@ -109,7 +109,7 @@ CITIES = [
     {"city":"Salem",              "state":"Tamil Nadu",     "cs":"salem",              "sl":"salem"},
 ]
 
-SOURCES = ["googlemaps", "sulekha", "clinicspots"]
+SOURCES = ["sulekha", "clinicspots", "googlemaps"]  # GMaps last — bot detection risk kam
 
 # ─── UTILS ──────────────────────────────────────────────────
 def make_key(name, phone, address):
