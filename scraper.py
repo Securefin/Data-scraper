@@ -262,7 +262,7 @@ def scrape_googlemaps(city, page=1):
             if processed >= 20:
                 break
             try:
-                card.click()
+                card.click(timeout=5000)
                 pg.wait_for_timeout(1500)   # 2s → 1.5s
 
                 phone = ""
