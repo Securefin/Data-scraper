@@ -433,7 +433,7 @@ def scrape_googlemaps(city, page=1):
                     const h = a.href.split('?')[0];
                     if (h && !links.includes(h)) links.push(h);
                 });
-                return links.slice(0, 20);
+                return links.slice(0, 8);  // 20 → 8: Google alert kam hoga
             }
         """)
 
@@ -446,17 +446,7 @@ def scrape_googlemaps(city, page=1):
         # Har URL pe fresh page open karo — DOM detach + same-number dono fix
         processed = 0
         for url in place_urls:
-            if processed >= 20:
-                break
-            detail_pg = None
-            try:
-                detail_pg = ctx.new_page()
-                row = _gmaps_extract_place_data(detail_pg, url, city)
-                if row:
-                    rows.append(row)
-                    log.info(f"    ✓ {row[0]} | {row[2] or 'no phone'}")
-                processed += 1
-                time.sleep(random.uniform(2.5, 4.0))
+            if processed >= 8:  # 20 → 8
             except Exception as e:
                 log.warning(f"    URL error: {e}")
                 processed += 1
