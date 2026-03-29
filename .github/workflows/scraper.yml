@@ -3,16 +3,15 @@ name: Dental Scraper
 
 on:
   schedule:
-    - cron: "0 1 * * *"     # IST 6:30 AM
-    - cron: "0 7 * * *"     # IST 12:30 PM
-    - cron: "0 13 * * *"    # IST 6:30 PM
-    - cron: "0 19 * * *"    # IST 12:30 AM
+    - cron: "0 2 * * *"     # IST 7:30 AM
+    - cron: "0 10 * * *"    # IST 3:30 PM
+    - cron: "0 18 * * *"    # IST 11:30 PM
   workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30      # FIX: 15 → 30 (setup ~5min + scraping 20min + buffer 5min)
+    timeout-minutes: 25      # 5min setup + 17min scraping + 3min buffer
 
     steps:
       - name: Checkout code
@@ -29,11 +28,11 @@ jobs:
           pip install -r requirements.txt
           pip install --upgrade playwright
           playwright install chromium
-          sudo playwright install-deps chromium    # FIX: sudo add kiya
+          sudo playwright install-deps chromium
 
       - name: Run scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          RUN_MINUTES: 20                          # FIX: 10 → 20, string → integer
+          RUN_MINUTES: 17
         run: python scraper.py
