@@ -657,12 +657,12 @@ def load_state_from_sheet(state_ws):
 
 def save_state_to_sheet(state_ws, state):
     try:
-        sheets_call_with_retry(state_ws.update, "A2:D2", [[
+        sheets_call_with_retry(state_ws.update, [[
             state["city_idx"],
             state["source_idx"],
             state["page"],
             now_ist()
-        ]])
+        ]], "A2:D2")
         log.info(f"  State saved → city:{state['city_idx']} source:{state['source_idx']} page:{state['page']}")
     except Exception as e:
         log.error(f"State save FAILED: {e}")
@@ -785,6 +785,13 @@ def main():
                 append_rows_to_sheet(ws, batch)
             except Exception as e:
                 log.error(f"  Final batch save failed: {e}")
+
+        # Saare sources complete ho gaye → next run ke liye fresh start
+        if all_done or source_idx >= total_sources:
+            city_idx   = 0
+            source_idx = 0
+            page       = 1
+            log.info("  State reset → next run fresh start karega")
 
         try:
             save_state_to_sheet(state_ws, {
