@@ -9,8 +9,6 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-from crawl4ai import AsyncWebCrawler
-from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -27,7 +25,7 @@ SHEET_NAME   = "Business Data"
 STATE_SHEET  = "Scraper State"
 BATCH_SIZE   = 10
 MAX_PAGES    = 5
-TIME_BUFFER  = 45
+TIME_BUFFER  = 120   # state save + final batch ke liye enough buffer
 SHEETS_RETRY = 5
 SHEETS_WAIT  = 12
 
@@ -672,14 +670,12 @@ def save_state_to_sheet(state_ws, state):
 def get_existing_keys(ws):
     keys = set()
     try:
-        names  = sheets_call_with_retry(ws.col_values, 1)
-        phones = sheets_call_with_retry(ws.col_values, 3)
-        addrs  = sheets_call_with_retry(ws.col_values, 6)
-        max_len = max(len(names), len(phones), len(addrs))
-        for i in range(1, max_len):
-            n = names[i]  if i < len(names)  else ""
-            p = phones[i] if i < len(phones) else ""
-            a = addrs[i]  if i < len(addrs)  else ""
+        # Ek hi API call mein saare columns fetch karo (3 calls ki jagah 1)
+        all_vals = sheets_call_with_retry(ws.get_all_values)
+        for row in (all_vals or [])[1:]:   # header row skip
+            n = row[0]  if len(row) > 0 else ""
+            p = row[2]  if len(row) > 2 else ""
+            a = row[5]  if len(row) > 5 else ""
             keys.add(make_key(n, p, a))
     except Exception as e:
         log.warning(f"  Existing keys fetch error: {e}")
